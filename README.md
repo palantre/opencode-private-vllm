@@ -184,6 +184,11 @@ synthetic burst completed without failures at 174.76 output tokens/second, with
 55.32 ms mean time per output token. These figures are a deployment check, not
 a workload-specific capacity guarantee.
 
+A 50 GB network-volume trial in `EUR-IS-1` used 29 GB for the model cache. Two
+successful A100 starts took 256 and 267 seconds, so a warm cache produced no
+measurable startup improvement. The unencrypted trial volume was deleted and
+the default remains ephemeral storage.
+
 ## Recovery
 
 If startup fails after Runpod created a Pod, the CLI attempts immediate
