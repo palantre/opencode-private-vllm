@@ -14,10 +14,10 @@ chat completions, structured tool calls, the OpenCode agent, idle monitoring,
 benchmarking, and termination all completed successfully. No Pod or network
 volume is left running by the validation.
 
-The llama.cpp/Q4_K_M route is implemented and covered by mocked lifecycle tests,
-but has not yet been validated on a real RTX 5090/4090. Treat it as pending until
-the image is published and the synthetic smoke, tool-call, OpenCode-agent, and
-termination checks have passed on real hardware.
+The llama.cpp/Q4_K_M image is published, its server flags pass the CI smoke
+check, and the route is covered by mocked lifecycle tests. It has not yet been
+validated on a real RTX 5090/4090. Treat it as pending until the synthetic smoke,
+tool-call, OpenCode-agent, and termination checks pass on real hardware.
 
 Do not process clinical or identifiable data until your organization has
 approved Runpod for that purpose and reviewed or signed the applicable DPA.
@@ -112,10 +112,8 @@ only at startup.
 
 ## Configure
 
-The published vLLM image is pinned to its immutable manifest digest. The example
-configuration deliberately leaves the llama.cpp image as `UNPUBLISHED`; replace
-it with the digest produced from this repository before a Q4 GPU can be planned
-or created. The CLI rejects mutable image tags for every engine. Defaults are:
+Both published images are pinned to immutable manifest digests. The CLI rejects
+mutable image tags for every engine. Defaults are:
 
 - GPUs, in order: L40S, RTX 6000 Ada, L40, RTX 5090, RTX 4090, A100 80 GB PCIe,
   A100 SXM4 80 GB
