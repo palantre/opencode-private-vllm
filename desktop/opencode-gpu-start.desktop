@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Start OpenCode private GPU
+Comment=Create an EU Secure Cloud GPU and open the local SSH tunnel
+Exec=opencode-gpu-desktop up
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;

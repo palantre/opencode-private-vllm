@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM=${0##*/}
+CONFIG_DIR=${OPENCODE_GPU_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/opencode-gpu"}
+STATE_DIR=${OPENCODE_GPU_STATE_DIR:-"${XDG_STATE_HOME:-$HOME/.local/state}/opencode-gpu"}
+CONFIG_FILE=${OPENCODE_GPU_CONFIG_FILE:-"$CONFIG_DIR/config"}
+KEY_FILE=${OPENCODE_GPU_KEY_FILE:-"$CONFIG_DIR/vllm-api-key"}
+STATE_FILE="$STATE_DIR/state.json"
+LOCK_FILE="$STATE_DIR/lifecycle.lock"
+MONITOR_LOG="$STATE_DIR/monitor.log"
+
+RUNPOD_POD_NAME=opencode-private-gpu
+RUNPOD_IMAGE=ghcr.io/CHANGE_ME/opencode-private-vllm:0.1.0
+RUNPOD_REGISTRY_AUTH_ID=
+RUNPOD_GPU_IDS='NVIDIA L40,NVIDIA RTX 6000 Ada Generation,NVIDIA L40S'
+RUNPOD_DATA_CENTER_IDS=
+RUNPOD_ALLOWED_DC_PREFIXES='EU-,EUR-'
+RUNPOD_NETWORK_VOLUME_ID=
+RUNPOD_CONTAINER_DISK_GB=80
+RUNPOD_VOLUME_GB=0
+RUNPOD_MAX_SESSION_MINUTES=240
+RUNPOD_MAX_PRICE_PER_HOUR=1.50
+VLLM_MODEL=Qwen/Qwen3.8-27B-FP8
+VLLM_REVISION=017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
+VLLM_SERVED_MODEL=qwen3.8-27b-fp8
+VLLM_MAX_MODEL_LEN=32768
+VLLM_LOCAL_PORT=18000
+VLLM_REMOTE_PORT=8000
+VLLM_IDLE_MINUTES=30
+MONITOR_INTERVAL_SECONDS=${OPENCODE_GPU_MONITOR_INTERVAL_SECONDS:-60}
+HEALTH_TIMEOUT_SECONDS=${OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS:-1200}
+
+[[ -r "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+note() {
+  printf '%s\n' "$*" >&2
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+read_key() {
+  [[ -r "$KEY_FILE" ]] || die "Missing vLLM key: $KEY_FILE. Run install.sh first."
+  VLLM_API_KEY=$(<"$KEY_FILE")
+  [[ -n "$VLLM_API_KEY" ]] || die "The vLLM key is empty: $KEY_FILE"
+}
+
+state_value() {
+  jq -er "$1" "$STATE_FILE" 2>/dev/null
+}
+
+pod_id() {
+  state_value '.pod_id'
+}
+
+pid_alive() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && kill -0 "$1" 2>/dev/null
+}
+
+pid_matches() {
+  local pid=${1:-} pattern=${2:-}
+  pid_alive "$pid" && [[ -r "/proc/$pid/cmdline" ]] && grep -aq -- "$pattern" "/proc/$pid/cmdline"
+}
+
+write_state() {
+  local content=$1 tmp
+  mkdir -p "$STATE_DIR"
+  tmp=$(mktemp "$STATE_DIR/state.XXXXXX")
+  printf '%s\n' "$content" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$STATE_FILE"
+}
+
+update_state() {
+  local filter=$1 tmp
+  shift
+  tmp=$(mktemp "$STATE_DIR/state.XXXXXX")
+  jq "$filter" "$@" "$STATE_FILE" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$STATE_FILE"
+}
+
+runpod() {
+  runpodctl "$@"
+}
+
+stock_available() {
+  local value=${1,,}
+  case "$value" in
+    ''|none|unavailable|'out of stock'|'no stock') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+dc_allowed() {
+  local dc=$1 prefix
+  IFS=',' read -ra allowed_prefixes <<< "$RUNPOD_ALLOWED_DC_PREFIXES"
+  for prefix in "${allowed_prefixes[@]}"; do
+    [[ -n "$prefix" && "$dc" == "$prefix"* ]] && return 0
+  done
+  return 1
+}
+
+select_gpu() {
+  local inventory preference candidate gpu dc price stock allowed
+  inventory=$(runpod gpu list --include-unavailable)
+  IFS=',' read -ra preferences <<< "$RUNPOD_GPU_IDS"
+
+  for preference in "${preferences[@]}"; do
+    preference=${preference#"${preference%%[![:space:]]*}"}
+    preference=${preference%"${preference##*[![:space:]]}"}
+    while IFS=$'\t' read -r gpu dc price stock; do
+      [[ -n "$gpu" && -n "$dc" && "$price" != null ]] || continue
+      dc_allowed "$dc" || continue
+      stock_available "$stock" || continue
+      if [[ -n "$RUNPOD_DATA_CENTER_IDS" ]]; then
+        allowed=0
+        IFS=',' read -ra configured_dcs <<< "$RUNPOD_DATA_CENTER_IDS"
+        for candidate in "${configured_dcs[@]}"; do
+          [[ "$dc" == "$candidate" ]] && allowed=1
+        done
+        (( allowed == 1 )) || continue
+      fi
+      jq -en --argjson price "$price" --argjson ceiling "$RUNPOD_MAX_PRICE_PER_HOUR" \
+        '$price <= $ceiling' | grep -qx true || continue
+      printf '%s\t%s\t%s\n' "$gpu" "$dc" "$price"
+      return 0
+    done < <(
+      jq -r --arg wanted "$preference" '
+        (.gpus? // .)[]
+        | select(.gpuId == $wanted and .secureCloud == true)
+        | . as $gpu
+        | ($gpu.dataCenterAvailability // [])[]
+        | [$gpu.gpuId, .dataCenterId, $gpu.securePricePerHr, (.stockStatus // "none")]
+        | @tsv
+      ' <<< "$inventory"
+    )
+  done
+  return 1
+}
+
+ssh_info() {
+  local info
+  info=$(runpod ssh info "$(pod_id)")
+  [[ $(jq -r '.error // empty' <<< "$info") == '' ]] || return 1
+  jq -e '.ip and .port' >/dev/null <<< "$info" || return 1
+  printf '%s\n' "$info"
+}
+
+ssh_args() {
+  local info=$1 key_path host port
+  host=$(jq -r '.ip' <<< "$info")
+  port=$(jq -r '.port' <<< "$info")
+  key_path=$(jq -r '.ssh_key.private_key_path // .ssh_key.path // empty' <<< "$info")
+  touch "$STATE_DIR/known_hosts"
+  chmod 600 "$STATE_DIR/known_hosts"
+  ssh-keygen -R "[$host]:$port" -f "$STATE_DIR/known_hosts" >/dev/null 2>&1 || true
+  SSH_ARGS=(
+    -p "$port"
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o "UserKnownHostsFile=$STATE_DIR/known_hosts"
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=3
+  )
+  [[ -z "$key_path" ]] || SSH_ARGS+=(-i "$key_path")
+  SSH_TARGET="root@$host"
+}
+
+start_tunnel() {
+  local info tunnel_pid
+  info=$(ssh_info) || die "Pod SSH information is unavailable."
+  ssh_args "$info"
+  ssh "${SSH_ARGS[@]}" \
+    -o ExitOnForwardFailure=yes \
+    -N -L "${VLLM_LOCAL_PORT}:127.0.0.1:${VLLM_REMOTE_PORT}" \
+    "$SSH_TARGET" >>"$STATE_DIR/tunnel.log" 2>&1 &
+  tunnel_pid=$!
+  sleep 2
+  pid_alive "$tunnel_pid" || die "SSH tunnel failed; see $STATE_DIR/tunnel.log"
+  update_state '.tunnel_pid = $pid' --argjson pid "$tunnel_pid"
+}
+
+wait_for_vllm() {
+  local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+  read_key
+  note "Waiting for vLLM model readiness (first download can take several minutes)..."
+  until curl --silent --show-error --fail --max-time 10 \
+      -H "Authorization: Bearer $VLLM_API_KEY" \
+      "http://127.0.0.1:${VLLM_LOCAL_PORT}/v1/models" >/dev/null 2>&1; do
+    (( SECONDS < deadline )) || die "vLLM did not become ready within ${HEALTH_TIMEOUT_SECONDS}s."
+    pid_alive "$(state_value '.tunnel_pid' || true)" || die "SSH tunnel exited while waiting for vLLM."
+    sleep 10
+  done
+}
+
+start_monitor() {
+  "$0" _monitor >>"$MONITOR_LOG" 2>&1 &
+  local monitor_pid=$!
+  update_state '.monitor_pid = $pid' --argjson pid "$monitor_pid"
+}
+
+delete_pod() {
+  local id=$1 attempt output error_file error_json code
+  error_file=$(mktemp "$STATE_DIR/delete.XXXXXX")
+  for attempt in 1 2 3; do
+    if output=$(runpod pod delete "$id" 2>"$error_file"); then
+      rm -f "$error_file"
+      return 0
+    fi
+    error_json=$(jq -Rn '[inputs | fromjson? | select(type == "object")] | first // {}' < "$error_file")
+    code=$(jq -r '.code // "unknown"' <<< "$error_json")
+    case "$code" in
+      not_found)
+        rm -f "$error_file"
+        return 0
+        ;;
+      network_error|rate_limited|server_error|api_error|graphql_error)
+        (( attempt < 3 )) && sleep $((attempt * 2))
+        ;;
+      *)
+        note "Runpod deletion failed: $(jq -r '.error // "unknown error"' <<< "$error_json")"
+        rm -f "$error_file"
+        return 1
+        ;;
+    esac
+  done
+  rm -f "$error_file"
+  return 1
+}
+
+up() {
+  local existing selection gpu dc price terminate_after env_json output id cache_dir create_error error_json error_code volume volume_dc
+  require_command runpodctl
+  require_command jq
+  require_command ssh
+  require_command curl
+  read_key
+  [[ "$RUNPOD_IMAGE" != *CHANGE_ME* ]] || die "Set RUNPOD_IMAGE in $CONFIG_FILE to your published image."
+  if [[ -n "$RUNPOD_NETWORK_VOLUME_ID" ]]; then
+    volume=$(runpod network-volume get "$RUNPOD_NETWORK_VOLUME_ID")
+    volume_dc=$(jq -er '.dataCenterId // .dataCenter.id' <<< "$volume") || die "Could not determine the network volume datacenter."
+    dc_allowed "$volume_dc" || die "The network volume is not in an allowed EU/EEA datacenter: $volume_dc"
+    [[ -z "$RUNPOD_DATA_CENTER_IDS" || "$RUNPOD_DATA_CENTER_IDS" == "$volume_dc" ]] || \
+      die "RUNPOD_DATA_CENTER_IDS does not match the network volume datacenter $volume_dc."
+    RUNPOD_DATA_CENTER_IDS=$volume_dc
+  fi
+
+  if [[ -r "$STATE_FILE" ]]; then
+    existing=$(pod_id || true)
+    [[ -z "$existing" ]] || die "State already tracks Pod $existing. Run '$PROGRAM status' or '$PROGRAM down'."
+  fi
+
+  selection=$(select_gpu) || die "No preferred Secure Cloud GPU is in stock in an allowed EU/EEA datacenter below the price ceiling."
+  IFS=$'\t' read -r gpu dc price <<< "$selection"
+  terminate_after=$(date -u -d "+${RUNPOD_MAX_SESSION_MINUTES} minutes" +%Y-%m-%dT%H:%M:%SZ)
+  cache_dir=/root/.cache/huggingface
+  [[ -z "$RUNPOD_NETWORK_VOLUME_ID" ]] || cache_dir=/workspace/huggingface
+  env_json=$(jq -cn \
+    --arg key "$VLLM_API_KEY" --arg model "$VLLM_MODEL" --arg revision "$VLLM_REVISION" \
+    --arg served "$VLLM_SERVED_MODEL" --arg port "$VLLM_REMOTE_PORT" \
+    --arg maxlen "$VLLM_MAX_MODEL_LEN" --arg cache "$cache_dir" \
+    '{VLLM_API_KEY:$key,VLLM_MODEL:$model,VLLM_REVISION:$revision,VLLM_SERVED_MODEL:$served,VLLM_PORT:$port,VLLM_MAX_MODEL_LEN:$maxlen,MODEL_CACHE_DIR:$cache}')
+
+  create_args=(pod create --name "$RUNPOD_POD_NAME" --image "$RUNPOD_IMAGE" --gpu-id "$gpu"
+    --gpu-count 1 --cloud-type SECURE --data-center-ids "$dc" --ports 22/tcp
+    --container-disk-in-gb "$RUNPOD_CONTAINER_DISK_GB" --env "$env_json"
+    --terminate-after "$terminate_after" --ssh --wait --wait-timeout 20m)
+  if [[ -n "$RUNPOD_NETWORK_VOLUME_ID" ]]; then
+    create_args+=(--network-volume-id "$RUNPOD_NETWORK_VOLUME_ID" --volume-mount-path /workspace)
+  elif (( RUNPOD_VOLUME_GB > 0 )); then
+    create_args+=(--volume-in-gb "$RUNPOD_VOLUME_GB" --volume-mount-path /workspace)
+  fi
+  [[ -z "$RUNPOD_REGISTRY_AUTH_ID" ]] || create_args+=(--registry-auth-id "$RUNPOD_REGISTRY_AUTH_ID")
+
+  note "Creating $gpu in $dc at up to \$$price/hour; hard termination: $terminate_after"
+  create_error=$(mktemp "$STATE_DIR/create.XXXXXX")
+  trap 'rc=$?; trap - EXIT; rm -f "${create_error:-}"; if (( rc != 0 )) && [[ -r "$STATE_FILE" ]]; then note "Startup failed; terminating Pod."; down || true; fi; exit "$rc"' EXIT
+  if ! output=$(runpod "${create_args[@]}" 2>"$create_error"); then
+    error_json=$(jq -Rn '[inputs | fromjson? | select(type == "object")] | first // {}' < "$create_error")
+    id=$(jq -r '.id // empty' <<< "$error_json")
+    error_code=$(jq -r '.code // "unknown"' <<< "$error_json")
+    if [[ -n "$id" ]]; then
+      write_state "$(jq -cn --arg id "$id" '{pod_id:$id,gpu:"unknown",data_center:"unknown",price_per_hour:null}')"
+    fi
+    die "Pod creation failed ($error_code): $(jq -r '.error // "unknown error"' <<< "$error_json")"
+  fi
+  rm -f "$create_error"
+  id=$(jq -er '.id // .pod.id' <<< "$output") || die "Could not read Pod id from runpodctl output."
+  write_state "$(jq -cn --arg id "$id" --arg gpu "$gpu" --arg dc "$dc" --argjson price "$price" \
+    --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg terminate "$terminate_after" \
+    '{pod_id:$id,gpu:$gpu,data_center:$dc,price_per_hour:$price,started_at:$started,terminate_after:$terminate}')"
+
+  start_tunnel
+  wait_for_vllm
+  update_state '.ready_at = $ready | .startup_seconds = ((($ready | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)' \
+    --arg ready "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  start_monitor
+  trap - EXIT
+  note "Ready: OpenAI-compatible API at http://127.0.0.1:${VLLM_LOCAL_PORT}/v1"
+  status
+}
+
+down() {
+  local id tunnel_pid monitor_pid
+  if [[ ! -r "$STATE_FILE" ]]; then
+    note "No local Pod state."
+    return 0
+  fi
+  id=$(pod_id || true)
+  tunnel_pid=$(state_value '.tunnel_pid // empty' || true)
+  monitor_pid=$(state_value '.monitor_pid // empty' || true)
+  [[ "$monitor_pid" == "$$" ]] || { pid_matches "$monitor_pid" 'opencode-gpu.*_monitor' && kill "$monitor_pid" 2>/dev/null || true; }
+  pid_matches "$tunnel_pid" 'ssh.*127.0.0.1' && kill "$tunnel_pid" 2>/dev/null || true
+  if [[ -n "$id" ]]; then
+    note "Terminating Pod $id..."
+    delete_pod "$id" || die "Runpod could not confirm termination of Pod $id; local state retained."
+  fi
+  rm -f "$STATE_FILE"
+  note "Pod terminated and local tunnel closed."
+}
+
+status() {
+  local id remote tunnel_pid monitor_pid
+  if [[ ! -r "$STATE_FILE" ]]; then
+    printf 'Status: down\n'
+    return 0
+  fi
+  id=$(pod_id)
+  tunnel_pid=$(state_value '.tunnel_pid // empty' || true)
+  monitor_pid=$(state_value '.monitor_pid // empty' || true)
+  remote=$(runpod pod get "$id" 2>/dev/null || true)
+  jq -n \
+    --argjson local "$(<"$STATE_FILE")" \
+    --argjson remote "${remote:-null}" \
+    --arg tunnel "$([[ -n "$tunnel_pid" ]] && pid_alive "$tunnel_pid" && printf running || printf stopped)" \
+    --arg monitor "$([[ -n "$monitor_pid" ]] && pid_alive "$monitor_pid" && printf running || printf stopped)" \
+    '{pod_id:$local.pod_id,gpu:$local.gpu,data_center:$local.data_center,price_per_hour:$local.price_per_hour,startup_seconds:($local.startup_seconds // null),terminate_after:$local.terminate_after,tunnel:$tunnel,idle_monitor:$monitor,runpod_status:($remote.runtimeStatus // $remote.desiredStatus // "unknown")}'
+}
+
+logs() {
+  local info
+  [[ -r "$STATE_FILE" ]] || die "No active Pod."
+  info=$(ssh_info) || die "Pod SSH is unavailable."
+  ssh_args "$info"
+  ssh "${SSH_ARGS[@]}" "$SSH_TARGET" 'tail -n 200 -f /var/log/opencode-gpu/vllm.log'
+}
+
+benchmark() {
+  local info
+  [[ -r "$STATE_FILE" ]] || die "No active Pod."
+  read_key
+  info=$(ssh_info) || die "Pod SSH is unavailable."
+  ssh_args "$info"
+  ssh "${SSH_ARGS[@]}" "$SSH_TARGET" \
+    vllm bench serve --backend openai-chat --base-url "http://127.0.0.1:${VLLM_REMOTE_PORT}" \
+    --endpoint /v1/chat/completions --model "$VLLM_SERVED_MODEL" --dataset-name random \
+    --num-prompts 20 --random-input-len 256 --random-output-len 128 \
+    --header "Authorization=Bearer $VLLM_API_KEY"
+}
+
+monitor() {
+  local idle_seconds=$((VLLM_IDLE_MINUTES * 60)) last_activity now metrics total previous_total=-1 running failures=0 tunnel_pid
+  [[ -r "$STATE_FILE" ]] || exit 0
+  read_key
+  last_activity=$(date +%s)
+  note "Idle monitor started; timeout ${VLLM_IDLE_MINUTES} minutes."
+  while [[ -r "$STATE_FILE" ]]; do
+    sleep "$MONITOR_INTERVAL_SECONDS"
+    tunnel_pid=$(state_value '.tunnel_pid // empty' || true)
+    if ! pid_matches "$tunnel_pid" 'ssh.*127.0.0.1'; then
+      note "SSH tunnel stopped; terminating Pod."
+      "$0" down
+      exit 0
+    fi
+    if ! metrics=$(curl --silent --fail --max-time 10 -H "Authorization: Bearer $VLLM_API_KEY" \
+      "http://127.0.0.1:${VLLM_LOCAL_PORT}/metrics" 2>/dev/null); then
+      ((failures += 1))
+      if (( failures >= 5 )); then
+        note "vLLM metrics unavailable for five checks; terminating Pod."
+        "$0" down
+        exit 0
+      fi
+      continue
+    fi
+    failures=0
+    total=$(awk '/^vllm:request_success_total(\{| )/{sum += $NF} END {print sum + 0}' <<< "$metrics")
+    running=$(awk '/^vllm:num_requests_(running|waiting)(\{| )/{sum += $NF} END {print sum + 0}' <<< "$metrics")
+    now=$(date +%s)
+    if [[ "$previous_total" == -1 || "$total" != "$previous_total" ]] || \
+       awk -v n="$running" 'BEGIN {exit !(n > 0)}'; then
+      last_activity=$now
+      previous_total=$total
+    fi
+    if (( now - last_activity >= idle_seconds )); then
+      note "No inference activity for ${VLLM_IDLE_MINUTES} minutes; terminating Pod."
+      "$0" down
+      exit 0
+    fi
+  done
+}
+
+session() {
+  "$0" up
+  trap '"$0" down' EXIT INT TERM HUP
+  OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_PURE=1 opencode --agent private-gpu "$@"
+}
+
+locked() {
+  require_command flock
+  mkdir -p "$STATE_DIR"
+  exec flock --close --exclusive --wait 10 "$LOCK_FILE" "$0" "$1"
+}
+
+usage() {
+  cat <<EOF
+Usage: $PROGRAM {up|down|status|logs|benchmark|session}
+
+  up         Create the Pod, tunnel vLLM, and start the idle monitor
+  down       Terminate the Pod and close the tunnel
+  status     Show local and Runpod status
+  logs       Follow remote vLLM logs
+  benchmark  Run a small random vLLM serving benchmark on the Pod
+  session    Run a private OpenCode TUI and terminate the Pod on exit
+EOF
+}
+
+case "${1:-}" in
+  up) locked _up ;;
+  down) locked _down ;;
+  _up) up ;;
+  _down) down ;;
+  status) status ;;
+  logs) logs ;;
+  benchmark) benchmark ;;
+  session) shift; session "$@" ;;
+  _monitor) monitor ;;
+  -h|--help|help|'') usage ;;
+  *) usage >&2; exit 2 ;;
+esac

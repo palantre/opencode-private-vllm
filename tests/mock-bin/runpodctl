@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%q ' "$@" >> "$MOCK_LOG"
+printf '\n' >> "$MOCK_LOG"
+
+case "$1 $2" in
+  'gpu list')
+    cat <<'JSON'
+[
+  {
+    "gpuId": "NVIDIA L40",
+    "secureCloud": true,
+    "securePricePerHr": 1.10,
+    "dataCenterAvailability": [
+      {"dataCenterId": "US-KS-2", "stockStatus": "High"},
+      {"dataCenterId": "EUR-IS-2", "stockStatus": "Medium"}
+    ]
+  }
+]
+JSON
+    ;;
+  'pod create')
+    if [[ "${MOCK_CREATE_FAIL:-0}" == 1 ]]; then
+      printf '%s\n' '{"error":"timed out waiting for ssh","code":"wait_timeout","id":"mock-pod-timeout"}' >&2
+      exit 1
+    fi
+    printf '%s\n' '{"id":"mock-pod-123","runtimeStatus":"running"}'
+    ;;
+  'ssh info')
+    printf '%s\n' '{"id":"mock-pod-123","ip":"192.0.2.10","port":22022,"ssh_key":{}}'
+    ;;
+  'pod get')
+    printf '%s\n' '{"id":"mock-pod-123","runtimeStatus":"running"}'
+    ;;
+  'pod delete')
+    if [[ "${MOCK_DELETE_NOT_FOUND:-0}" == 1 ]]; then
+      printf '%s\n' '{"error":"pod not found","code":"not_found"}' >&2
+      exit 1
+    fi
+    : > "$MOCK_DELETED"
+    printf '%s\n' '{"id":"mock-pod-123","runtimeStatus":"terminated"}'
+    ;;
+  *)
+    printf 'Unexpected mock runpodctl call: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac

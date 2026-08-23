@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$*" == *'/metrics'* ]]; then
+  printf '%s\n' 'vllm:request_success_total{finished_reason="stop"} 0'
+  printf '%s\n' 'vllm:num_requests_running 0'
+  printf '%s\n' 'vllm:num_requests_waiting 0'
+else
+  printf '%s\n' '{"object":"list","data":[{"id":"qwen3.8-27b-fp8"}]}'
+fi

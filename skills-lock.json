@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "runpod-usage": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/runpod-usage/SKILL.md",
+      "computedHash": "185267f9449ae323568dd1e18690d8c15cc4282593044e99fdf2af9d3fdd7224"
+    },
+    "runpodctl": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/runpodctl/SKILL.md",
+      "computedHash": "4d17354b4af4156c8d380b269393befd0561b660c68a4dc4435340ca6f6032d2"
+    },
+    "vllm-bench-serve": {
+      "source": "vllm-project/vllm-skills",
+      "sourceType": "github",
+      "skillPath": "plugins/vllm-skills/skills/vllm-bench-serve/SKILL.md",
+      "computedHash": "84dc7f4627f045680b605a91603ba686aa687d0545044702896b34d1868153ad"
+    }
+  }
+}

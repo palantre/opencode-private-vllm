@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Stop OpenCode private GPU
+Comment=Terminate the current Runpod GPU and close its SSH tunnel
+Exec=opencode-gpu-desktop down
+Icon=process-stop
+Terminal=false
+Categories=Development;

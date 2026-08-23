@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -u
+
+action=${1:-}
+title='OpenCode private GPU'
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/opencode-gpu"
+mkdir -p "$log_dir"
+log_file="$log_dir/desktop-${action:-unknown}.log"
+
+notify() {
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send "$title" "$1"
+  fi
+}
+
+case "$action" in
+  up)
+    notify 'Creating the private EU GPU. This can take several minutes.'
+    if opencode-gpu up >"$log_file" 2>&1; then
+      notify 'Private GPU ready on 127.0.0.1:18000.'
+    else
+      notify "Startup failed. See $log_file"
+      exit 1
+    fi
+    ;;
+  down)
+    if opencode-gpu down >"$log_file" 2>&1; then
+      notify 'Private GPU terminated.'
+    else
+      notify "Termination could not be confirmed. See $log_file"
+      exit 1
+    fi
+    ;;
+  *)
+    printf 'Usage: %s {up|down}\n' "${0##*/}" >&2
+    exit 2
+    ;;
+esac

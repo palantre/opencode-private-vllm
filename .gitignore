@@ -1,0 +1,4 @@
+.env
+.runpod/
+.agents/
+*.log
