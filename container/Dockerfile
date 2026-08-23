@@ -18,4 +18,4 @@ COPY start.sh /opt/opencode-gpu/start.sh
 RUN chmod 755 /opt/opencode-gpu/start.sh
 
 EXPOSE 22
-ENTRYPOINT ["/usr/bin/tini", "--", "/opt/opencode-gpu/start.sh"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/opt/opencode-gpu/start.sh"]

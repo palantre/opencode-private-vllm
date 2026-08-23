@@ -24,8 +24,9 @@ OpenCode -> http://127.0.0.1:18000/v1
          -> vLLM / Qwen
 ```
 
-Only `22/tcp` is requested from Runpod. vLLM binds to remote `127.0.0.1` and
-also requires an API key. The CLI selects a preferred GPU only when it has
+Only `22/tcp` is requested from Runpod. vLLM binds to remote `127.0.0.1`; the
+local provider key satisfies the OpenAI client but is not sent to Runpod as a
+server secret. The CLI selects a preferred GPU only when it has
 reported stock in an allowed `EU-*` or `EUR-*` datacenter, pins creation there, and
 uses `--cloud-type SECURE`.
 
@@ -102,10 +103,10 @@ Defaults are:
 
 - Model: `Qwen/Qwen3.8-27B-FP8`
 - Revision: `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`
-- GPUs, in order: L40, RTX 6000 Ada, L40S
+- GPUs, in order: L40S, L40, RTX 6000 Ada
 - Secure Cloud EU/EEA placement only
 - Maximum GPU price: `$1.50/hour`
-- Model context: 32,768 tokens
+- Model context: 32,768 tokens; 16 concurrent sequences; FP8 KV cache
 - Idle termination: 30 minutes
 - Hard session termination: 240 minutes
 
@@ -182,5 +183,5 @@ opencode-gpu down
 Never delete `~/.local/state/opencode-gpu/state.json` merely to clear an error;
 doing so can orphan a billable Pod. Confirm termination in Runpod first.
 
-Logs are in `~/.local/state/opencode-gpu/`. The generated API key and lifecycle
+Logs are always in `~/.local/state/opencode-gpu/`. The generated API key and lifecycle
 configuration are in `~/.config/opencode-gpu/` with user-only permissions.

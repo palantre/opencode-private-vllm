@@ -40,6 +40,9 @@ assert_log '--ports 22/tcp'
 if grep -F -- '8000/http' "$MOCK_LOG" >/dev/null; then
   fail 'vLLM HTTP port was exposed publicly'
 fi
+if grep -F -- 'test-private-key' "$MOCK_LOG" >/dev/null; then
+  fail 'local provider key was sent to Runpod'
+fi
 "$ROOT/bin/opencode-gpu" status | jq -e '.tunnel == "running" and .idle_monitor == "running"' >/dev/null
 "$ROOT/bin/opencode-gpu" down >/dev/null
 [[ -e "$MOCK_DELETED" ]] || fail 'down did not terminate the Pod'

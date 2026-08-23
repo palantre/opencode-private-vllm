@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROGRAM=${0##*/}
 CONFIG_DIR=${OPENCODE_GPU_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/opencode-gpu"}
-STATE_DIR=${OPENCODE_GPU_STATE_DIR:-"${XDG_STATE_HOME:-$HOME/.local/state}/opencode-gpu"}
+STATE_DIR=${OPENCODE_GPU_STATE_DIR:-"$HOME/.local/state/opencode-gpu"}
 CONFIG_FILE=${OPENCODE_GPU_CONFIG_FILE:-"$CONFIG_DIR/config"}
 KEY_FILE=${OPENCODE_GPU_KEY_FILE:-"$CONFIG_DIR/vllm-api-key"}
 STATE_FILE="$STATE_DIR/state.json"
@@ -13,7 +13,7 @@ MONITOR_LOG="$STATE_DIR/monitor.log"
 RUNPOD_POD_NAME=opencode-private-gpu
 RUNPOD_IMAGE=ghcr.io/CHANGE_ME/opencode-private-vllm:0.1.0
 RUNPOD_REGISTRY_AUTH_ID=
-RUNPOD_GPU_IDS='NVIDIA L40,NVIDIA RTX 6000 Ada Generation,NVIDIA L40S'
+RUNPOD_GPU_IDS='NVIDIA L40S,NVIDIA L40,NVIDIA RTX 6000 Ada Generation'
 RUNPOD_DATA_CENTER_IDS=
 RUNPOD_ALLOWED_DC_PREFIXES='EU-,EUR-'
 RUNPOD_NETWORK_VOLUME_ID=
@@ -264,10 +264,10 @@ up() {
   cache_dir=/root/.cache/huggingface
   [[ -z "$RUNPOD_NETWORK_VOLUME_ID" ]] || cache_dir=/workspace/huggingface
   env_json=$(jq -cn \
-    --arg key "$VLLM_API_KEY" --arg model "$VLLM_MODEL" --arg revision "$VLLM_REVISION" \
+    --arg model "$VLLM_MODEL" --arg revision "$VLLM_REVISION" \
     --arg served "$VLLM_SERVED_MODEL" --arg port "$VLLM_REMOTE_PORT" \
     --arg maxlen "$VLLM_MAX_MODEL_LEN" --arg cache "$cache_dir" \
-    '{VLLM_API_KEY:$key,VLLM_MODEL:$model,VLLM_REVISION:$revision,VLLM_SERVED_MODEL:$served,VLLM_PORT:$port,VLLM_MAX_MODEL_LEN:$maxlen,MODEL_CACHE_DIR:$cache}')
+    '{MODEL_ID:$model,MODEL_REVISION:$revision,SERVED_MODEL_NAME:$served,SERVER_PORT:$port,MAX_MODEL_LEN:$maxlen,MODEL_CACHE_DIR:$cache}')
 
   create_args=(pod create --name "$RUNPOD_POD_NAME" --image "$RUNPOD_IMAGE" --gpu-id "$gpu"
     --gpu-count 1 --cloud-type SECURE --data-center-ids "$dc" --ports 22/tcp
@@ -282,7 +282,7 @@ up() {
 
   note "Creating $gpu in $dc at up to \$$price/hour; hard termination: $terminate_after"
   create_error=$(mktemp "$STATE_DIR/create.XXXXXX")
-  trap 'rc=$?; trap - EXIT; rm -f "${create_error:-}"; if (( rc != 0 )) && [[ -r "$STATE_FILE" ]]; then note "Startup failed; terminating Pod."; down || true; fi; exit "$rc"' EXIT
+  trap 'rc=$?; trap - EXIT; rm -f "${create_error:-}"; if (( rc != 0 )) && [[ -r "$STATE_FILE" ]]; then note "Startup failed; capturing logs before termination."; runpod pod logs "$(pod_id)" --since 30m >"$STATE_DIR/startup-failure.log" 2>&1 || true; down || true; fi; exit "$rc"' EXIT
   if ! output=$(runpod "${create_args[@]}" 2>"$create_error"); then
     error_json=$(jq -Rn '[inputs | fromjson? | select(type == "object")] | first // {}' < "$create_error")
     id=$(jq -r '.id // empty' <<< "$error_json")
