@@ -6,9 +6,11 @@ inference HTTP port is never published by Runpod.
 
 ## Safety Status
 
-The local implementation and mocked lifecycle are ready. Real provisioning is
-intentionally not yet tested because it requires a funded Runpod account,
-Runpod credentials, a published container, and available EU GPU stock.
+The mocked lifecycle and real synthetic-data path were validated on 2026-08-23
+using a Secure Cloud L40S in `EUR-IS-2`. Startup, SSH-only forwarding, OpenAI
+chat completions, structured tool calls, the OpenCode agent, idle monitoring,
+benchmarking, and termination all completed successfully. No Pod or network
+volume is left running by the validation.
 
 Do not process clinical or identifiable data until your organization has
 approved Runpod for that purpose and reviewed or signed the applicable DPA.
@@ -159,7 +161,9 @@ Pod should need to download the roughly 31 GB model again.
 
 To test persistent caching:
 
-1. Create a Runpod network volume in an EU datacenter.
+1. Create a standard Runpod network volume of at least 50 GB in an EU/EEA
+   datacenter with compatible GPU stock. At current list pricing, 50 GB is
+   approximately `$3.50/month` while the volume exists.
 2. Set `RUNPOD_NETWORK_VOLUME_ID`. The CLI reads and pins its actual
    datacenter; an optional `RUNPOD_DATA_CENTER_IDS` must match exactly.
 3. Run `up`, record `startup_seconds`, and run `down`.
@@ -168,6 +172,16 @@ To test persistent caching:
 The CLI derives the volume datacenter from Runpod and verifies EU placement,
 preventing an accidental cross-datacenter placement. Delete the volume after
 the trial if cache reuse does not justify its continuous storage charge.
+
+Runpod network volumes cannot be encrypted. Use one only for the public model
+cache; never store prompts, clinical data, credentials, or other sensitive
+artifacts there. The model cache path is `/workspace/huggingface`; runtime logs
+remain on ephemeral container storage.
+
+The validated ephemeral baseline was 359 seconds to readiness. A 20-request
+synthetic burst completed without failures at 174.76 output tokens/second, with
+55.32 ms mean time per output token. These figures are a deployment check, not
+a workload-specific capacity guarantee.
 
 ## Recovery
 

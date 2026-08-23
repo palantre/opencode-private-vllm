@@ -55,6 +55,19 @@ export MOCK_DELETE_NOT_FOUND=1
 unset MOCK_DELETE_NOT_FOUND
 [[ ! -e "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'down retained state for an already-terminated Pod'
 
+printf '%s\n' \
+  'RUNPOD_IMAGE=example.invalid/private-vllm:test' \
+  'RUNPOD_MAX_PRICE_PER_HOUR=1.20' \
+  'RUNPOD_NETWORK_VOLUME_ID=mock-volume-123' > "$OPENCODE_GPU_CONFIG_DIR/config"
+plan=$("$ROOT/bin/opencode-gpu" plan)
+jq -e '.data_center == "EUR-IS-2" and .network_volume == {id:"mock-volume-123",data_center:"EUR-IS-2",size_gb:50}' <<< "$plan" >/dev/null || \
+  fail 'plan did not validate and report the network volume'
+"$ROOT/bin/opencode-gpu" up >/dev/null
+assert_log '--network-volume-id mock-volume-123'
+assert_log '--volume-mount-path /workspace'
+"$ROOT/bin/opencode-gpu" down >/dev/null
+
+rm -f "$MOCK_DELETED"
 export MOCK_CREATE_FAIL=1
 if "$ROOT/bin/opencode-gpu" up >/dev/null 2>&1; then
   fail 'wait timeout unexpectedly succeeded'

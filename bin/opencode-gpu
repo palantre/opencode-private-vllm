@@ -154,6 +154,21 @@ ssh_info() {
   printf '%s\n' "$info"
 }
 
+pin_to_network_volume() {
+  local volume
+  NETWORK_VOLUME_DC=
+  NETWORK_VOLUME_SIZE_GB=null
+  [[ -n "$RUNPOD_NETWORK_VOLUME_ID" ]] || return 0
+
+  volume=$(runpod network-volume get "$RUNPOD_NETWORK_VOLUME_ID") || die "Could not read network volume $RUNPOD_NETWORK_VOLUME_ID."
+  NETWORK_VOLUME_DC=$(jq -er '.dataCenterId // .dataCenter.id' <<< "$volume") || die "Could not determine the network volume datacenter."
+  NETWORK_VOLUME_SIZE_GB=$(jq -r '.size // "null"' <<< "$volume")
+  dc_allowed "$NETWORK_VOLUME_DC" || die "The network volume is not in an allowed EU/EEA datacenter: $NETWORK_VOLUME_DC"
+  [[ -z "$RUNPOD_DATA_CENTER_IDS" || "$RUNPOD_DATA_CENTER_IDS" == "$NETWORK_VOLUME_DC" ]] || \
+    die "RUNPOD_DATA_CENTER_IDS does not match the network volume datacenter $NETWORK_VOLUME_DC."
+  RUNPOD_DATA_CENTER_IDS=$NETWORK_VOLUME_DC
+}
+
 ssh_args() {
   local info=$1 key_path host port
   host=$(jq -r '.ip' <<< "$info")
@@ -237,21 +252,14 @@ delete_pod() {
 }
 
 up() {
-  local existing selection gpu dc price terminate_after env_json output id cache_dir create_error error_json error_code volume volume_dc
+  local existing selection gpu dc price terminate_after env_json output id cache_dir create_error error_json error_code
   require_command runpodctl
   require_command jq
   require_command ssh
   require_command curl
   read_key
   [[ "$RUNPOD_IMAGE" != *CHANGE_ME* ]] || die "Set RUNPOD_IMAGE in $CONFIG_FILE to your published image."
-  if [[ -n "$RUNPOD_NETWORK_VOLUME_ID" ]]; then
-    volume=$(runpod network-volume get "$RUNPOD_NETWORK_VOLUME_ID")
-    volume_dc=$(jq -er '.dataCenterId // .dataCenter.id' <<< "$volume") || die "Could not determine the network volume datacenter."
-    dc_allowed "$volume_dc" || die "The network volume is not in an allowed EU/EEA datacenter: $volume_dc"
-    [[ -z "$RUNPOD_DATA_CENTER_IDS" || "$RUNPOD_DATA_CENTER_IDS" == "$volume_dc" ]] || \
-      die "RUNPOD_DATA_CENTER_IDS does not match the network volume datacenter $volume_dc."
-    RUNPOD_DATA_CENTER_IDS=$volume_dc
-  fi
+  pin_to_network_volume
 
   if [[ -r "$STATE_FILE" ]]; then
     existing=$(pod_id || true)
@@ -369,12 +377,14 @@ plan() {
   require_command runpodctl
   require_command jq
   [[ "$RUNPOD_IMAGE" != *CHANGE_ME* ]] || die "Set RUNPOD_IMAGE in $CONFIG_FILE to your published image."
+  pin_to_network_volume
   selection=$(select_gpu) || die "No preferred Secure Cloud GPU is in stock in an allowed EU/EEA datacenter below the price ceiling."
   IFS=$'\t' read -r gpu dc price <<< "$selection"
   jq -n --arg gpu "$gpu" --arg dc "$dc" --argjson price "$price" --arg image "$RUNPOD_IMAGE" \
     --arg model "$VLLM_MODEL" --argjson disk "$RUNPOD_CONTAINER_DISK_GB" \
-    --argjson max_minutes "$RUNPOD_MAX_SESSION_MINUTES" \
-    '{billable_resource_created:false,gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,container_disk_gb:$disk,max_session_minutes:$max_minutes,image:$image,model:$model}'
+    --argjson max_minutes "$RUNPOD_MAX_SESSION_MINUTES" --arg volume "$RUNPOD_NETWORK_VOLUME_ID" \
+    --arg volume_dc "${NETWORK_VOLUME_DC:-}" --argjson volume_size "${NETWORK_VOLUME_SIZE_GB:-null}" \
+    '{billable_resource_created:false,gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,container_disk_gb:$disk,max_session_minutes:$max_minutes,image:$image,model:$model,network_volume:(if $volume == "" then null else {id:$volume,data_center:$volume_dc,size_gb:$volume_size} end)}'
 }
 
 monitor() {

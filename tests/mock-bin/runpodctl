@@ -20,6 +20,9 @@ case "$1 $2" in
 ]
 JSON
     ;;
+  'network-volume get')
+    printf '%s\n' '{"id":"mock-volume-123","name":"model-cache","size":50,"dataCenterId":"EUR-IS-2"}'
+    ;;
   'pod create')
     if [[ "${MOCK_CREATE_FAIL:-0}" == 1 ]]; then
       printf '%s\n' '{"error":"timed out waiting for ssh","code":"wait_timeout","id":"mock-pod-timeout"}' >&2
