@@ -356,14 +356,12 @@ logs() {
 benchmark() {
   local info
   [[ -r "$STATE_FILE" ]] || die "No active Pod."
-  read_key
   info=$(ssh_info) || die "Pod SSH is unavailable."
   ssh_args "$info"
   ssh "${SSH_ARGS[@]}" "$SSH_TARGET" \
     vllm bench serve --backend openai-chat --base-url "http://127.0.0.1:${VLLM_REMOTE_PORT}" \
-    --endpoint /v1/chat/completions --model "$VLLM_SERVED_MODEL" --dataset-name random \
-    --num-prompts 20 --random-input-len 256 --random-output-len 128 \
-    --header "Authorization=Bearer $VLLM_API_KEY"
+    --endpoint /v1/chat/completions --model "$VLLM_SERVED_MODEL" --tokenizer "$VLLM_MODEL" --dataset-name random \
+    --num-prompts 20 --random-input-len 256 --random-output-len 128
 }
 
 plan() {
