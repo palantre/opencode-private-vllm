@@ -366,6 +366,19 @@ benchmark() {
     --header "Authorization=Bearer $VLLM_API_KEY"
 }
 
+plan() {
+  local selection gpu dc price
+  require_command runpodctl
+  require_command jq
+  [[ "$RUNPOD_IMAGE" != *CHANGE_ME* ]] || die "Set RUNPOD_IMAGE in $CONFIG_FILE to your published image."
+  selection=$(select_gpu) || die "No preferred Secure Cloud GPU is in stock in an allowed EU/EEA datacenter below the price ceiling."
+  IFS=$'\t' read -r gpu dc price <<< "$selection"
+  jq -n --arg gpu "$gpu" --arg dc "$dc" --argjson price "$price" --arg image "$RUNPOD_IMAGE" \
+    --arg model "$VLLM_MODEL" --argjson disk "$RUNPOD_CONTAINER_DISK_GB" \
+    --argjson max_minutes "$RUNPOD_MAX_SESSION_MINUTES" \
+    '{billable_resource_created:false,gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,container_disk_gb:$disk,max_session_minutes:$max_minutes,image:$image,model:$model}'
+}
+
 monitor() {
   local idle_seconds=$((VLLM_IDLE_MINUTES * 60)) last_activity now metrics total previous_total=-1 running failures=0 tunnel_pid
   [[ -r "$STATE_FILE" ]] || exit 0
@@ -421,8 +434,9 @@ locked() {
 
 usage() {
   cat <<EOF
-Usage: $PROGRAM {up|down|status|logs|benchmark|session}
+Usage: $PROGRAM {plan|up|down|status|logs|benchmark|session}
 
+  plan       Show placement and price without creating a resource
   up         Create the Pod, tunnel vLLM, and start the idle monitor
   down       Terminate the Pod and close the tunnel
   status     Show local and Runpod status
@@ -433,6 +447,7 @@ EOF
 }
 
 case "${1:-}" in
+  plan) plan ;;
   up) locked _up ;;
   down) locked _down ;;
   _up) up ;;

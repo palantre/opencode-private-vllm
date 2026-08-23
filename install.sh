@@ -71,5 +71,5 @@ command -v update-desktop-database >/dev/null 2>&1 && \
   update-desktop-database "$APPLICATION_DIR" >/dev/null 2>&1 || true
 
 printf 'Installed opencode-gpu.\n'
-printf 'Next: edit %s and set RUNPOD_IMAGE.\n' "$CONFIG_DIR/config"
+printf 'Lifecycle configuration: %s\n' "$CONFIG_DIR/config"
 printf 'Restart OpenCode to load the provider and private-gpu agent.\n'

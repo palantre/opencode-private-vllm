@@ -96,7 +96,8 @@ only at startup.
 
 ## Configure
 
-Edit `~/.config/opencode-gpu/config` and at minimum replace `RUNPOD_IMAGE`.
+The published default image is pinned to its immutable multi-platform manifest
+digest. Edit `~/.config/opencode-gpu/config` only when publishing a replacement.
 Defaults are:
 
 - Model: `Qwen/Qwen3.8-27B-FP8`
@@ -122,12 +123,16 @@ truth.
 ## Use
 
 ```bash
+opencode-gpu plan
 opencode-gpu up
 opencode-gpu status
 opencode-gpu logs
 opencode-gpu benchmark
 opencode-gpu down
 ```
+
+`plan` queries current inventory and prints the exact allowed GPU, datacenter,
+price, image, and hard session duration without creating a billable resource.
 
 After `up`, choose the `private-gpu` agent in an already-open OpenCode Desktop
 window for synthetic work. The application menu also contains **Start OpenCode
