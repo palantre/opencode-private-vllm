@@ -37,6 +37,8 @@ bash -n "$ROOT/config/opencode-gpu.env.example"
 assert_log '--cloud-type SECURE'
 assert_log '--data-center-ids EUR-IS-2'
 assert_log '--ports 22/tcp'
+assert_log 'KV_CACHE_DTYPE'
+assert_log 'fp8'
 if grep -F -- '8000/http' "$MOCK_LOG" >/dev/null; then
   fail 'vLLM HTTP port was exposed publicly'
 fi

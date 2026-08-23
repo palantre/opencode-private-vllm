@@ -7,6 +7,7 @@ set -euo pipefail
 : "${SERVER_PORT:=8000}"
 : "${MAX_MODEL_LEN:=32768}"
 : "${MODEL_CACHE_DIR:=/root/.cache/huggingface}"
+: "${KV_CACHE_DTYPE:=fp8}"
 
 mkdir -p "$MODEL_CACHE_DIR" /var/log/opencode-gpu
 export HF_HOME="$MODEL_CACHE_DIR"
@@ -29,7 +30,7 @@ exec vllm serve "$MODEL_ID" \
   --dtype auto \
   --max-model-len "$MAX_MODEL_LEN" \
   --max-num-seqs 16 \
-  --kv-cache-dtype fp8 \
+  --kv-cache-dtype "$KV_CACHE_DTYPE" \
   --language-model-only \
   --reasoning-parser qwen3 \
   --enable-auto-tool-choice \

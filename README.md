@@ -108,7 +108,8 @@ Defaults are:
 - GPUs, in order: L40S, L40, RTX 6000 Ada
 - Secure Cloud EU/EEA placement only
 - Maximum GPU price: `$1.50/hour`
-- Model context: 32,768 tokens; 16 concurrent sequences; FP8 KV cache
+- Model context: 32,768 tokens; 16 concurrent sequences; FP8 KV cache by
+  default (`VLLM_KV_CACHE_DTYPE=auto` is available for older GPUs)
 - Idle termination: 30 minutes
 - Hard session termination: 240 minutes
 

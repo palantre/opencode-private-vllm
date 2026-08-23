@@ -25,6 +25,7 @@ VLLM_MODEL=Qwen/Qwen3.8-27B-FP8
 VLLM_REVISION=017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
 VLLM_SERVED_MODEL=qwen3.8-27b-fp8
 VLLM_MAX_MODEL_LEN=32768
+VLLM_KV_CACHE_DTYPE=fp8
 VLLM_LOCAL_PORT=18000
 VLLM_REMOTE_PORT=8000
 VLLM_IDLE_MINUTES=30
@@ -274,8 +275,8 @@ up() {
   env_json=$(jq -cn \
     --arg model "$VLLM_MODEL" --arg revision "$VLLM_REVISION" \
     --arg served "$VLLM_SERVED_MODEL" --arg port "$VLLM_REMOTE_PORT" \
-    --arg maxlen "$VLLM_MAX_MODEL_LEN" --arg cache "$cache_dir" \
-    '{MODEL_ID:$model,MODEL_REVISION:$revision,SERVED_MODEL_NAME:$served,SERVER_PORT:$port,MAX_MODEL_LEN:$maxlen,MODEL_CACHE_DIR:$cache}')
+    --arg maxlen "$VLLM_MAX_MODEL_LEN" --arg cache "$cache_dir" --arg kv "$VLLM_KV_CACHE_DTYPE" \
+    '{MODEL_ID:$model,MODEL_REVISION:$revision,SERVED_MODEL_NAME:$served,SERVER_PORT:$port,MAX_MODEL_LEN:$maxlen,MODEL_CACHE_DIR:$cache,KV_CACHE_DTYPE:$kv}')
 
   create_args=(pod create --name "$RUNPOD_POD_NAME" --image "$RUNPOD_IMAGE" --gpu-id "$gpu"
     --gpu-count 1 --cloud-type SECURE --data-center-ids "$dc" --ports 22/tcp
