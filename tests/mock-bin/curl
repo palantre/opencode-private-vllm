@@ -5,6 +5,13 @@ if [[ "$*" == *'/metrics'* ]]; then
   printf '%s\n' 'vllm:request_success_total{finished_reason="stop"} 0'
   printf '%s\n' 'vllm:num_requests_running 0'
   printf '%s\n' 'vllm:num_requests_waiting 0'
+  printf '%s\n' 'llamacpp:prompt_tokens_total 0'
+  printf '%s\n' 'llamacpp:tokens_predicted_total 0'
+  printf '%s\n' 'llamacpp:requests_processing 0'
+  printf '%s\n' 'llamacpp:requests_deferred 0'
+elif [[ "$*" == *'/v1/chat/completions'* ]]; then
+  tokens=${MOCK_COMPLETION_TOKENS:-10}
+  printf '{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":%s,"total_tokens":30}}\n' "$tokens"
 else
   printf '%s\n' '{"object":"list","data":[{"id":"qwen3.8-27b-fp8"}]}'
 fi

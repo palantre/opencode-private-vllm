@@ -6,6 +6,7 @@ set -euo pipefail
 : "${SERVED_MODEL_NAME:=qwen3.8-27b-fp8}"
 : "${SERVER_PORT:=8000}"
 : "${MAX_MODEL_LEN:=32768}"
+: "${MAX_NUM_SEQS:=16}"
 : "${MODEL_CACHE_DIR:=/root/.cache/huggingface}"
 : "${KV_CACHE_DTYPE:=fp8}"
 
@@ -29,7 +30,7 @@ exec vllm serve "$MODEL_ID" \
   --port "$SERVER_PORT" \
   --dtype auto \
   --max-model-len "$MAX_MODEL_LEN" \
-  --max-num-seqs 16 \
+  --max-num-seqs "$MAX_NUM_SEQS" \
   --kv-cache-dtype "$KV_CACHE_DTYPE" \
   --language-model-only \
   --reasoning-parser qwen3 \

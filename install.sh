@@ -46,7 +46,7 @@ tmp=$(mktemp "$OPENCODE_DIR/opencode.jsonc.XXXXXX")
 jq --arg key_file "$CONFIG_DIR/vllm-api-key" '
   .share = "disabled"
   | .provider."runpod-private" = {
-      name: "Runpod private vLLM",
+      name: "Runpod private Qwen",
       npm: "@ai-sdk/openai-compatible",
       options: {
         baseURL: "http://127.0.0.1:18000/v1",
@@ -55,7 +55,7 @@ jq --arg key_file "$CONFIG_DIR/vllm-api-key" '
       },
       models: {
         "qwen3.8-27b-fp8": {
-          name: "Qwen3.8 27B FP8 (private Runpod)",
+          name: "Qwen3.8 27B (private Runpod)",
           reasoning: true,
           tool_call: true,
           temperature: true,

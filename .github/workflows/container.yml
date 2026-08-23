@@ -1,10 +1,11 @@
-name: Build private vLLM image
+name: Build private inference images
 
 on:
   workflow_dispatch:
   push:
     paths:
       - container/**
+      - container-llama-cpp/**
       - .github/workflows/container.yml
 
 permissions:
@@ -14,6 +15,14 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: vllm
+            context: container
+          - name: llama-cpp
+            context: container-llama-cpp
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -25,11 +34,18 @@ jobs:
       - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: meta
         with:
-          images: ghcr.io/${{ github.repository_owner }}/opencode-private-vllm
+          images: ghcr.io/${{ github.repository_owner }}/opencode-private-${{ matrix.name }}
           tags: type=sha,prefix=
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: container
+          context: ${{ matrix.context }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Check llama.cpp server flags
+        if: matrix.name == 'llama-cpp'
+        run: |
+          docker run --rm --entrypoint /app/llama-server "${{ steps.meta.outputs.tags }}" --help > /tmp/llama-server-help
+          grep -F -- '--fit' /tmp/llama-server-help
+          grep -F -- '--no-mmproj' /tmp/llama-server-help
+          grep -F -- '--metrics' /tmp/llama-server-help
