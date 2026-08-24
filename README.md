@@ -8,16 +8,13 @@ is never published by Runpod.
 
 ## Safety Status
 
-The mocked lifecycle and real synthetic-data path were validated on 2026-08-23
-using a Secure Cloud L40S in `EUR-IS-2`. Startup, SSH-only forwarding, OpenAI
-chat completions, structured tool calls, the OpenCode agent, idle monitoring,
-benchmarking, and termination all completed successfully. No Pod or network
-volume is left running by the validation.
-
-The llama.cpp/Q4_K_M image is published, its server flags pass the CI smoke
-check, and the route is covered by mocked lifecycle tests. It has not yet been
-validated on a real RTX 5090/4090. Treat it as pending until the synthetic smoke,
-tool-call, OpenCode-agent, and termination checks pass on real hardware.
+The mocked lifecycle and both real synthetic-data paths have been validated.
+The vLLM/FP8 route passed on a Secure Cloud L40S in `EUR-IS-2` on 2026-08-23.
+The llama.cpp/Q4_K_M route passed on a Secure Cloud RTX 4090 in `EU-RO-1` on
+2026-08-24. Startup, SSH-only forwarding, OpenAI chat completions, structured
+tool calls, the OpenCode agent, benchmarking, and explicit termination completed
+successfully. Mocked tests cover idle termination for both engines. No Pod or
+network volume was left running.
 
 Do not process clinical or identifiable data until your organization has
 approved Runpod for that purpose and reviewed or signed the applicable DPA.
@@ -131,6 +128,7 @@ mutable image tags for every engine. Defaults are:
   `115a859329b5f4e876bed5ed49225d8097d055783a81945004a80af2fb2703f8`;
   startup refuses bytes that do not match
 - Idle termination: 30 minutes
+- Startup readiness timeout: 20 minutes for vLLM and 60 minutes for llama.cpp
 - Hard session termination: 240 minutes
 
 The stable OpenAI model ID remains `qwen3.8-27b-fp8` for compatibility with the
@@ -216,6 +214,12 @@ The validated ephemeral baseline was 359 seconds to readiness. A 20-request
 synthetic burst completed without failures at 174.76 output tokens/second, with
 55.32 ms mean time per output token. These figures are a deployment check, not
 a workload-specific capacity guarantee.
+
+The RTX 4090 Q4_K_M cold start took 3,013 seconds, dominated by downloading the
+16.811 GB GGUF. It used 17,044 MiB of 24,564 MiB VRAM after serving requests. A
+20-request synthetic burst completed without failures at 39.66 output
+tokens/second. The temporary 25 GB network volume used for resumable validation
+was deleted.
 
 A 50 GB network-volume trial in `EUR-IS-1` used 29 GB for the model cache. Two
 successful A100 starts took 256 and 267 seconds, so a warm cache produced no

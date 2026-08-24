@@ -41,6 +41,7 @@ VLLM_REMOTE_PORT=8000
 VLLM_IDLE_MINUTES=30
 MONITOR_INTERVAL_SECONDS=${OPENCODE_GPU_MONITOR_INTERVAL_SECONDS:-60}
 HEALTH_TIMEOUT_SECONDS=${OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS:-1200}
+LLAMA_CPP_HEALTH_TIMEOUT_SECONDS=${OPENCODE_GPU_LLAMA_CPP_HEALTH_TIMEOUT_SECONDS:-${OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS:-3600}}
 
 [[ -r "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
@@ -279,13 +280,19 @@ start_tunnel() {
 }
 
 wait_for_server() {
-  local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+  local health_timeout deadline
+  if [[ "$PROFILE_ENGINE" == llama_cpp ]]; then
+    health_timeout=$LLAMA_CPP_HEALTH_TIMEOUT_SECONDS
+  else
+    health_timeout=$HEALTH_TIMEOUT_SECONDS
+  fi
+  deadline=$((SECONDS + health_timeout))
   read_key
-  note "Waiting for $PROFILE_ENGINE model readiness (first download can take several minutes)..."
+  note "Waiting up to ${health_timeout}s for $PROFILE_ENGINE model readiness..."
   until curl --silent --show-error --fail --max-time 10 \
       -H "Authorization: Bearer $VLLM_API_KEY" \
       "http://127.0.0.1:${VLLM_LOCAL_PORT}/v1/models" >/dev/null 2>&1; do
-    (( SECONDS < deadline )) || die "$PROFILE_ENGINE did not become ready within ${HEALTH_TIMEOUT_SECONDS}s."
+    (( SECONDS < deadline )) || die "$PROFILE_ENGINE did not become ready within ${health_timeout}s."
     pid_alive "$(state_value '.tunnel_pid' || true)" || die "SSH tunnel exited while waiting for $PROFILE_ENGINE."
     sleep 10
   done
@@ -492,7 +499,7 @@ benchmark() {
 }
 
 plan() {
-  local selection gpu dc price
+  local selection gpu dc price health_timeout
   require_command runpodctl
   require_command jq
   pin_to_network_volume
@@ -503,13 +510,18 @@ plan() {
   IFS=$'\t' read -r gpu dc price <<< "$selection"
   configure_profile "$gpu"
   validate_profile_image
+  if [[ "$PROFILE_ENGINE" == llama_cpp ]]; then
+    health_timeout=$LLAMA_CPP_HEALTH_TIMEOUT_SECONDS
+  else
+    health_timeout=$HEALTH_TIMEOUT_SECONDS
+  fi
   jq -n --arg gpu "$gpu" --arg dc "$dc" --argjson price "$price" --arg image "$PROFILE_IMAGE" \
     --arg engine "$PROFILE_ENGINE" --arg model "$PROFILE_MODEL" --arg revision "$PROFILE_REVISION" \
     --arg served "$PROFILE_SERVED_MODEL" --argjson maxlen "$PROFILE_MAX_MODEL_LEN" \
-    --argjson disk "$RUNPOD_CONTAINER_DISK_GB" \
+    --argjson disk "$RUNPOD_CONTAINER_DISK_GB" --argjson health_timeout "$health_timeout" \
     --argjson max_minutes "$RUNPOD_MAX_SESSION_MINUTES" --arg volume "$RUNPOD_NETWORK_VOLUME_ID" \
     --arg volume_dc "${NETWORK_VOLUME_DC:-}" --argjson volume_size "${NETWORK_VOLUME_SIZE_GB:-null}" \
-    '{billable_resource_created:false,gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,engine:$engine,container_disk_gb:$disk,max_session_minutes:$max_minutes,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,network_volume:(if $volume == "" then null else {id:$volume,data_center:$volume_dc,size_gb:$volume_size} end)}'
+    '{billable_resource_created:false,gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,engine:$engine,container_disk_gb:$disk,startup_timeout_seconds:$health_timeout,max_session_minutes:$max_minutes,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,network_volume:(if $volume == "" then null else {id:$volume,data_center:$volume_dc,size_gb:$volume_size} end)}'
 }
 
 monitor() {

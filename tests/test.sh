@@ -31,6 +31,9 @@ assert_log() {
 }
 
 bash -n "$ROOT/config/opencode-gpu.env.example"
+plan=$(env -u OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS "$ROOT/bin/opencode-gpu" plan)
+jq -e '.engine == "vllm" and .startup_timeout_seconds == 1200' <<< "$plan" >/dev/null || \
+  fail 'vLLM plan did not report its startup timeout'
 "$ROOT/bin/opencode-gpu" up >/dev/null
 [[ -r "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'up did not create state'
 [[ $(jq -r '.pod_id' "$OPENCODE_GPU_STATE_DIR/state.json") == mock-pod-123 ]] || fail 'wrong Pod id'
@@ -65,8 +68,8 @@ printf '%s\n' \
   'RUNPOD_IMAGE=example.invalid/private-vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   'RUNPOD_LLAMA_CPP_IMAGE=example.invalid/private-llama-cpp@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
   'RUNPOD_MAX_PRICE_PER_HOUR=1.20' > "$OPENCODE_GPU_CONFIG_DIR/config"
-plan=$("$ROOT/bin/opencode-gpu" plan)
-jq -e '.gpu == "NVIDIA GeForce RTX 5090" and .engine == "llama_cpp" and .max_model_len == 32768 and (.image | startswith("example.invalid/private-llama-cpp@sha256:"))' <<< "$plan" >/dev/null || \
+plan=$(env -u OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS "$ROOT/bin/opencode-gpu" plan)
+jq -e '.gpu == "NVIDIA GeForce RTX 5090" and .engine == "llama_cpp" and .max_model_len == 32768 and .startup_timeout_seconds == 3600 and (.image | startswith("example.invalid/private-llama-cpp@sha256:"))' <<< "$plan" >/dev/null || \
   fail 'RTX 5090 profile was not selected'
 
 printf '%s\n' \
