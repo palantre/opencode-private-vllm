@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+printf '%q ' "$@" >> "$MOCK_SSH_LOG"
+printf '\n' >> "$MOCK_SSH_LOG"
+
 if [[ " $* " == *' -N '* ]]; then
   trap 'exit 0' TERM INT
   while :; do sleep 1; done

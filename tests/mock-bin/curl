@@ -1,7 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$*" == *'/metrics'* ]]; then
+args=$*
+payload=
+while (( $# > 0 )); do
+  if [[ "$1" == --data-binary && $# -gt 1 ]]; then
+    payload=$2
+    shift 2
+  elif [[ "$1" == -H && $# -gt 1 && "$2" == @/dev/fd/* ]]; then
+    printf '%s\n' "$(<"${2#@}")" > "$MOCK_CURL_HEADER_LOG"
+    shift 2
+  else
+    shift
+  fi
+done
+
+if [[ "$args" == *'/graphql'* ]]; then
+  printf '%s\n' "$payload" > "$MOCK_GRAPHQL_LOG"
+  if jq -e '.pending_pod_name and (.pod_id == null)' "$OPENCODE_GPU_STATE_DIR/state.json" >/dev/null 2>&1; then
+    : > "$MOCK_PENDING_SEEN"
+  fi
+  if [[ "${MOCK_GRAPHQL_AMBIGUOUS:-0}" == 1 ]]; then
+    printf '%s\n' 'operation timed out after Pod creation' >&2
+    exit "${MOCK_GRAPHQL_AMBIGUOUS_STATUS:-28}"
+  fi
+  if [[ "${MOCK_GRAPHQL_UNREACHABLE:-0}" == 1 ]]; then
+    printf '%s\n' 'could not resolve GraphQL host' >&2
+    exit 6
+  fi
+  if [[ "${MOCK_GRAPHQL_REJECTED:-0}" == 1 ]]; then
+    printf '%s\n' '{"errors":[{"message":"There are no longer any instances available with the requested specifications. Please refresh and try again."}],"data":{"podFindAndDeployOnDemand":null}}'
+    exit 0
+  fi
+  printf '%s\n' '{"data":{"podFindAndDeployOnDemand":{"id":"mock-pod-123"}}}'
+elif [[ "$args" == *'/metrics'* ]]; then
   printf '%s\n' 'vllm:request_success_total{finished_reason="stop"} 0'
   printf '%s\n' 'vllm:num_requests_running 0'
   printf '%s\n' 'vllm:num_requests_waiting 0'
@@ -9,7 +41,7 @@ if [[ "$*" == *'/metrics'* ]]; then
   printf '%s\n' 'llamacpp:tokens_predicted_total 0'
   printf '%s\n' 'llamacpp:requests_processing 0'
   printf '%s\n' 'llamacpp:requests_deferred 0'
-elif [[ "$*" == *'/v1/chat/completions'* ]]; then
+elif [[ "$args" == *'/v1/chat/completions'* ]]; then
   tokens=${MOCK_COMPLETION_TOKENS:-10}
   printf '{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":%s,"total_tokens":30}}\n' "$tokens"
 else

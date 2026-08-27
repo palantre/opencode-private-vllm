@@ -13,6 +13,7 @@ MONITOR_LOG="$STATE_DIR/monitor.log"
 RUNPOD_POD_NAME=opencode-private-gpu
 RUNPOD_IMAGE=ghcr.io/palantre/opencode-private-vllm@sha256:c2765a7c4c9421c1b7828fd9b5ac5ab7164688e89dc5e63e9ff805e1270e3e6b
 RUNPOD_LLAMA_CPP_IMAGE=ghcr.io/palantre/opencode-private-llama-cpp@sha256:fa196c293c7e72146e5a61c0b16562e10f4b518ffe144f5b4fa6d8628e12f352
+RUNPOD_FORCE_LLAMA_CPP=0
 RUNPOD_REGISTRY_AUTH_ID=
 RUNPOD_GPU_IDS='NVIDIA L40S,NVIDIA RTX 6000 Ada Generation,NVIDIA L40,NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe,NVIDIA A100-SXM4-80GB'
 RUNPOD_DATA_CENTER_IDS=
@@ -22,6 +23,7 @@ RUNPOD_CONTAINER_DISK_GB=80
 RUNPOD_VOLUME_GB=0
 RUNPOD_MAX_SESSION_MINUTES=240
 RUNPOD_MAX_PRICE_PER_HOUR=1.50
+RUNPOD_MIN_DOWNLOAD_MBPS=${RUNPOD_MIN_DOWNLOAD_MBPS:-100}
 VLLM_MODEL=Qwen/Qwen3.8-27B-FP8
 VLLM_REVISION=017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
 VLLM_SERVED_MODEL=qwen3.8-27b-fp8
@@ -32,6 +34,7 @@ LLAMA_CPP_MODEL=Chungulus/Qwen3.8-27B-Q4_K_M-GGUF
 LLAMA_CPP_REVISION=5ae8e19376c871fd4fccd956a967f58b1598c8aa
 LLAMA_CPP_MODEL_FILE=Qwen3.8-27B-Q4_K_M.gguf
 LLAMA_CPP_MODEL_SHA256=115a859329b5f4e876bed5ed49225d8097d055783a81945004a80af2fb2703f8
+LLAMA_CPP_CONTEXT_SIZE=32768
 LLAMA_CPP_5090_CONTEXT_SIZE=32768
 LLAMA_CPP_4090_CONTEXT_SIZE=32768
 LLAMA_CPP_PARALLEL=1
@@ -42,6 +45,8 @@ VLLM_IDLE_MINUTES=30
 MONITOR_INTERVAL_SECONDS=${OPENCODE_GPU_MONITOR_INTERVAL_SECONDS:-60}
 HEALTH_TIMEOUT_SECONDS=${OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS:-1200}
 LLAMA_CPP_HEALTH_TIMEOUT_SECONDS=${OPENCODE_GPU_LLAMA_CPP_HEALTH_TIMEOUT_SECONDS:-${OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS:-3600}}
+RECONCILE_ATTEMPTS=${OPENCODE_GPU_RECONCILE_ATTEMPTS:-12}
+RECONCILE_INTERVAL_SECONDS=${OPENCODE_GPU_RECONCILE_INTERVAL_SECONDS:-5}
 
 [[ -r "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
@@ -69,7 +74,7 @@ state_value() {
 }
 
 pod_id() {
-  state_value '.pod_id'
+  state_value '.pod_id // empty'
 }
 
 pid_alive() {
@@ -103,6 +108,148 @@ runpod() {
   runpodctl "$@"
 }
 
+runpod_config_value() {
+  local wanted=$1 config_file=${RUNPOD_CONFIG_FILE:-"$HOME/.runpod/config.toml"} line key value quote
+  [[ -r "$config_file" ]] || return 1
+  while IFS= read -r line; do
+    [[ "$line" == *=* ]] || continue
+    key=${line%%=*}
+    key=${key#"${key%%[![:space:]]*}"}
+    key=${key%"${key##*[![:space:]]}"}
+    [[ "$key" == "$wanted" ]] || continue
+    value=${line#*=}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    quote=${value:0:1}
+    if [[ "$quote" == "'" || "$quote" == '"' ]]; then
+      [[ "${value: -1}" == "$quote" ]] || return 1
+      value=${value:1:${#value}-2}
+    fi
+    [[ -n "$value" ]] || return 1
+    printf '%s\n' "$value"
+    return 0
+  done < "$config_file"
+  return 1
+}
+
+runpod_api_key() {
+  if [[ -n "${RUNPOD_API_KEY:-}" ]]; then
+    printf '%s\n' "$RUNPOD_API_KEY"
+  else
+    runpod_config_value apikey
+  fi
+}
+
+runpod_graphql_url() {
+  local configured
+  if [[ -n "${RUNPOD_GRAPHQL_URL:-}" ]]; then
+    printf '%s\n' "$RUNPOD_GRAPHQL_URL"
+  elif configured=$(runpod_config_value apiurl 2>/dev/null) || configured=$(runpod_config_value apiUrl 2>/dev/null); then
+    printf '%s\n' "$configured"
+  else
+    printf '%s\n' 'https://api.runpod.io/graphql'
+  fi
+}
+
+create_pod_graphql() {
+  local gpu=$1 dc=$2 terminate_after=$3 env_json=$4 pod_name=$5 api_key graphql_url query input payload response
+  local curl_error curl_status error_code message
+  api_key=$(runpod_api_key) || {
+    jq -cn '{error:"Runpod API key is not configured",code:"no_credentials"}' >&2
+    return 1
+  }
+  graphql_url=$(runpod_graphql_url)
+  query='mutation createPod($input: PodFindAndDeployOnDemandInput!) { podFindAndDeployOnDemand(input: $input) { id } }'
+  input=$(jq -cn \
+    --arg gpu "$gpu" --arg dc "$dc" --arg image "$PROFILE_IMAGE" --arg name "$pod_name" \
+    --arg terminate "$terminate_after" --arg mount /workspace --arg network "$RUNPOD_NETWORK_VOLUME_ID" \
+    --arg registry "$RUNPOD_REGISTRY_AUTH_ID" --argjson disk "$RUNPOD_CONTAINER_DISK_GB" \
+    --argjson volume "$RUNPOD_VOLUME_GB" --argjson min_download "$RUNPOD_MIN_DOWNLOAD_MBPS" \
+    --argjson env "$env_json" \
+    '{cloudType:"SECURE",containerDiskInGb:$disk,gpuCount:1,gpuTypeId:$gpu,imageName:$image,name:$name,
+      ports:"22/tcp",startSsh:true,dataCenterId:$dc,terminateAfter:$terminate,minDownload:$min_download,
+      env:($env | to_entries | map({key:.key,value:(.value | tostring)}))}
+      + (if $network != "" then {networkVolumeId:$network,volumeMountPath:$mount}
+         elif $volume > 0 then {volumeInGb:$volume,volumeMountPath:$mount} else {} end)
+      + (if $registry != "" then {containerRegistryAuthId:$registry} else {} end)')
+  payload=$(jq -cn --arg query "$query" --argjson input "$input" '{query:$query,variables:{input:$input}}')
+  curl_error=$(mktemp "$STATE_DIR/graphql.XXXXXX")
+  if response=$(curl --disable --silent --show-error --fail-with-body --max-time 30 \
+      -H @<(printf 'Authorization: Bearer %s\n' "$api_key") -H 'Content-Type: application/json' \
+      --data-binary "$payload" "$graphql_url" 2>"$curl_error"); then
+    :
+  else
+    curl_status=$?
+    message=$(jq -r '.errors[0].message // empty' <<< "$response" 2>/dev/null || true)
+    [[ -n "$message" ]] || message=$(<"$curl_error")
+    rm -f "$curl_error"
+    case "$curl_status" in
+      1|2|3|4|5|6|7|35|43|48|49|60|77|82|83|90|91) error_code=graphql_unreachable ;;
+      *) error_code=graphql_ambiguous ;;
+    esac
+    jq -cn --arg error "${message:-GraphQL request failed}" --arg code "$error_code" \
+      '{error:$error,code:$code}' >&2
+    return 1
+  fi
+  rm -f "$curl_error"
+  if jq -e '.data.podFindAndDeployOnDemand.id' >/dev/null 2>&1 <<< "$response"; then
+    jq -c '.data.podFindAndDeployOnDemand' <<< "$response"
+    return 0
+  fi
+  message=$(jq -r '.errors[0].message // empty' <<< "$response")
+  if [[ -n "$message" ]]; then
+    if [[ "$message" == *'There are no longer any instances available with the requested specifications'* ]]; then
+      jq -cn --arg error "$message" '{error:$error,code:"graphql_rejected"}' >&2
+    else
+      jq -cn --arg error "$message" '{error:$error,code:"graphql_ambiguous"}' >&2
+    fi
+  else
+    jq -cn '{error:"Pod creation returned no id",code:"graphql_ambiguous"}' >&2
+  fi
+  return 1
+}
+
+validate_min_download() {
+  [[ "$RUNPOD_MIN_DOWNLOAD_MBPS" =~ ^(0|[1-9][0-9]{0,9})$ ]] &&
+    (( 10#$RUNPOD_MIN_DOWNLOAD_MBPS <= 2147483647 )) ||
+    die "RUNPOD_MIN_DOWNLOAD_MBPS must be an integer from 0 to 2147483647 without leading zeros."
+}
+
+validate_reconcile_settings() {
+  [[ "$RECONCILE_ATTEMPTS" =~ ^[1-9][0-9]?$ ]] ||
+    die "OPENCODE_GPU_RECONCILE_ATTEMPTS must be an integer from 1 to 99."
+  [[ "$RECONCILE_INTERVAL_SECONDS" =~ ^(0|[1-9][0-9]{0,2})$ ]] ||
+    die "OPENCODE_GPU_RECONCILE_INTERVAL_SECONDS must be an integer from 0 to 999 without leading zeros."
+}
+
+reconcile_graphql_create() {
+  local pod_name=$1 attempt pods id found=0 deletion_failed=0
+  for ((attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt++)); do
+    if ! pods=$(runpod pod list --all 2>/dev/null); then
+      (( attempt < RECONCILE_ATTEMPTS )) && sleep "$RECONCILE_INTERVAL_SECONDS"
+      continue
+    fi
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      found=1
+      note "Ambiguous GraphQL result created Pod $id; terminating it..."
+      if ! delete_pod "$id"; then
+        deletion_failed=1
+        update_state '.pod_id = $id' --arg id "$id"
+      fi
+    done < <(jq -r --arg name "$pod_name" '(.pods? // .)[]? | select(.name == $name) | .id' <<< "$pods" 2>/dev/null)
+    (( found == 1 )) && (( deletion_failed == 0 )) && return 0
+    (( attempt < RECONCILE_ATTEMPTS )) && sleep "$RECONCILE_INTERVAL_SECONDS"
+  done
+  return 1
+}
+
+pending_pod_absent() {
+  local pod_name=$1 pods
+  pods=$(runpod pod list --all 2>/dev/null) || return 1
+  ! jq -e --arg name "$pod_name" '(.pods? // .)[]? | select(.name == $name)' >/dev/null <<< "$pods"
+}
+
 stock_available() {
   local value=${1,,}
   case "$value" in
@@ -111,27 +258,38 @@ stock_available() {
   esac
 }
 
+configure_llama_cpp_profile() {
+  local gpu=$1
+  PROFILE_SERVED_MODEL=$VLLM_SERVED_MODEL
+  PROFILE_ENGINE=llama_cpp
+  PROFILE_IMAGE=$RUNPOD_LLAMA_CPP_IMAGE
+  PROFILE_MODEL=$LLAMA_CPP_MODEL
+  PROFILE_REVISION=$LLAMA_CPP_REVISION
+  PROFILE_MAX_MODEL_LEN=$LLAMA_CPP_CONTEXT_SIZE
+  PROFILE_PARALLEL=$LLAMA_CPP_PARALLEL
+  PROFILE_LOG_FILE=/var/log/opencode-gpu/llama-cpp.log
+  case "$gpu" in
+    'NVIDIA GeForce RTX 5090') PROFILE_MAX_MODEL_LEN=$LLAMA_CPP_5090_CONTEXT_SIZE ;;
+    'NVIDIA GeForce RTX 4090') PROFILE_MAX_MODEL_LEN=$LLAMA_CPP_4090_CONTEXT_SIZE ;;
+  esac
+}
+
 configure_profile() {
   local gpu=$1
   PROFILE_SERVED_MODEL=$VLLM_SERVED_MODEL
+  [[ "$RUNPOD_FORCE_LLAMA_CPP" == 0 || "$RUNPOD_FORCE_LLAMA_CPP" == 1 ]] ||
+    die "RUNPOD_FORCE_LLAMA_CPP must be 0 or 1."
+  if [[ "$RUNPOD_FORCE_LLAMA_CPP" == 1 ]]; then
+    case "$gpu" in
+      'NVIDIA GeForce RTX 5090'|'NVIDIA GeForce RTX 4090'|'NVIDIA RTX PRO 4500 Blackwell'|'NVIDIA RTX 6000 Ada Generation'|'NVIDIA L40'|'NVIDIA L40S'|'NVIDIA RTX A6000'|'NVIDIA A100 80GB PCIe'|'NVIDIA A100-SXM4-80GB')
+        configure_llama_cpp_profile "$gpu"
+        return
+        ;;
+    esac
+  fi
   case "$gpu" in
-    'NVIDIA GeForce RTX 5090')
-      PROFILE_ENGINE=llama_cpp
-      PROFILE_IMAGE=$RUNPOD_LLAMA_CPP_IMAGE
-      PROFILE_MODEL=$LLAMA_CPP_MODEL
-      PROFILE_REVISION=$LLAMA_CPP_REVISION
-      PROFILE_MAX_MODEL_LEN=$LLAMA_CPP_5090_CONTEXT_SIZE
-      PROFILE_PARALLEL=$LLAMA_CPP_PARALLEL
-      PROFILE_LOG_FILE=/var/log/opencode-gpu/llama-cpp.log
-      ;;
-    'NVIDIA GeForce RTX 4090')
-      PROFILE_ENGINE=llama_cpp
-      PROFILE_IMAGE=$RUNPOD_LLAMA_CPP_IMAGE
-      PROFILE_MODEL=$LLAMA_CPP_MODEL
-      PROFILE_REVISION=$LLAMA_CPP_REVISION
-      PROFILE_MAX_MODEL_LEN=$LLAMA_CPP_4090_CONTEXT_SIZE
-      PROFILE_PARALLEL=$LLAMA_CPP_PARALLEL
-      PROFILE_LOG_FILE=/var/log/opencode-gpu/llama-cpp.log
+    'NVIDIA GeForce RTX 5090'|'NVIDIA GeForce RTX 4090')
+      configure_llama_cpp_profile "$gpu"
       ;;
     'NVIDIA A100 80GB PCIe'|'NVIDIA A100-SXM4-80GB')
       PROFILE_ENGINE=vllm
@@ -143,7 +301,7 @@ configure_profile() {
       PROFILE_KV_CACHE_DTYPE=auto
       PROFILE_LOG_FILE=/var/log/opencode-gpu/vllm.log
       ;;
-    'NVIDIA L40S'|'NVIDIA RTX 6000 Ada Generation'|'NVIDIA L40')
+    'NVIDIA L40S'|'NVIDIA RTX 6000 Ada Generation'|'NVIDIA L40'|'NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb')
       PROFILE_ENGINE=vllm
       PROFILE_IMAGE=$RUNPOD_IMAGE
       PROFILE_MODEL=$VLLM_MODEL
@@ -258,6 +416,7 @@ ssh_args() {
     -o BatchMode=yes
     -o StrictHostKeyChecking=accept-new
     -o "UserKnownHostsFile=$STATE_DIR/known_hosts"
+    -o ConnectTimeout=10
     -o ServerAliveInterval=30
     -o ServerAliveCountMax=3
   )
@@ -279,6 +438,19 @@ start_tunnel() {
   update_state '.tunnel_pid = $pid' --argjson pid "$tunnel_pid"
 }
 
+wait_for_ssh() {
+  local deadline=$((SECONDS + 1200)) info
+  note "Waiting up to 1200s for Pod SSH..."
+  while :; do
+    if info=$(ssh_info 2>/dev/null); then
+      ssh_args "$info"
+      ssh "${SSH_ARGS[@]}" "$SSH_TARGET" true >/dev/null 2>&1 && return 0
+    fi
+    (( SECONDS < deadline )) || die "Pod SSH did not become available within 1200s."
+    sleep 10
+  done
+}
+
 wait_for_server() {
   local health_timeout deadline
   if [[ "$PROFILE_ENGINE" == llama_cpp ]]; then
@@ -296,6 +468,19 @@ wait_for_server() {
     pid_alive "$(state_value '.tunnel_pid' || true)" || die "SSH tunnel exited while waiting for $PROFILE_ENGINE."
     sleep 10
   done
+}
+
+capture_startup_failure() {
+  local id info log_file
+  cp "$STATE_FILE" "$STATE_DIR/startup-failure-state.json" 2>/dev/null || true
+  id=$(pod_id || true)
+  [[ -z "$id" ]] || runpod pod logs "$id" --since 30m >"$STATE_DIR/startup-failure.log" 2>&1 || true
+  info=$(ssh_info 2>/dev/null || true)
+  [[ -n "$info" ]] || return 0
+  ssh_args "$info"
+  log_file=$(state_value '.log_file // "/var/log/opencode-gpu/vllm.log"' || true)
+  ssh "${SSH_ARGS[@]}" "$SSH_TARGET" tail -c 200000 -- "$log_file" \
+    >"$STATE_DIR/startup-failure-remote.log" 2>&1 || true
 }
 
 start_monitor() {
@@ -334,18 +519,19 @@ delete_pod() {
 }
 
 up() {
-  local existing selection gpu dc price terminate_after env_json output id cache_dir create_error error_json error_code
+  local selection gpu dc price terminate_after env_json output id cache_dir create_error error_json error_code pod_name started
   require_command runpodctl
   require_command jq
   require_command ssh
   require_command curl
   read_key
+  validate_min_download
+  validate_reconcile_settings
+  (( RUNPOD_MIN_DOWNLOAD_MBPS == 0 )) || runpod_api_key >/dev/null ||
+    die "Runpod API key is not configured. Set RUNPOD_API_KEY or run runpodctl doctor."
   pin_to_network_volume
 
-  if [[ -r "$STATE_FILE" ]]; then
-    existing=$(pod_id || true)
-    [[ -z "$existing" ]] || die "State already tracks Pod $existing. Run '$PROGRAM status' or '$PROGRAM down'."
-  fi
+  [[ ! -r "$STATE_FILE" ]] || die "Local lifecycle state already exists. Run '$PROGRAM status' or '$PROGRAM down'."
 
   selection=$(select_gpu) || {
     (( $? == 2 )) && die "In-stock preferred GPUs were found, but none has a configured immutable engine image."
@@ -387,10 +573,30 @@ up() {
   fi
   [[ -z "$RUNPOD_REGISTRY_AUTH_ID" ]] || create_args+=(--registry-auth-id "$RUNPOD_REGISTRY_AUTH_ID")
 
-  note "Creating $gpu with $PROFILE_ENGINE in $dc at up to \$$price/hour; hard termination: $terminate_after"
+  started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  note "Creating $gpu with $PROFILE_ENGINE in $dc at up to \$$price/hour; minimum download: ${RUNPOD_MIN_DOWNLOAD_MBPS} Mbps; hard termination: $terminate_after"
+  pod_name=$RUNPOD_POD_NAME
+  (( RUNPOD_MIN_DOWNLOAD_MBPS == 0 )) || pod_name="${RUNPOD_POD_NAME}-$(date -u +%Y%m%d%H%M%S)-$$"
   create_error=$(mktemp "$STATE_DIR/create.XXXXXX")
-  trap 'rc=$?; trap - EXIT; rm -f "${create_error:-}"; if (( rc != 0 )) && [[ -r "$STATE_FILE" ]]; then note "Startup failed; capturing logs before termination."; runpod pod logs "$(pod_id)" --since 30m >"$STATE_DIR/startup-failure.log" 2>&1 || true; down || true; fi; exit "$rc"' EXIT
-  if ! output=$(runpod "${create_args[@]}" 2>"$create_error"); then
+  trap 'rc=$?; trap - EXIT; rm -f "${create_error:-}"; if (( rc != 0 )) && [[ -r "$STATE_FILE" ]] && [[ -n "$(pod_id || true)" ]]; then note "Startup failed; capturing logs before termination."; capture_startup_failure; down || true; fi; exit "$rc"' EXIT
+  if (( RUNPOD_MIN_DOWNLOAD_MBPS > 0 )); then
+    write_state "$(jq -cn --arg name "$pod_name" --arg started "$started" --arg terminate "$terminate_after" \
+      '{pod_id:null,pending_pod_name:$name,started_at:$started,terminate_after:$terminate}')"
+    output=$(create_pod_graphql "$gpu" "$dc" "$terminate_after" "$env_json" "$pod_name" 2>"$create_error") || {
+      error_json=$(jq -Rn '[inputs | fromjson? | select(type == "object")] | first // {}' < "$create_error")
+      error_code=$(jq -r '.code // "unknown"' <<< "$error_json")
+      if [[ "$error_code" == graphql_ambiguous ]]; then
+        if reconcile_graphql_create "$pod_name"; then
+          rm -f "$STATE_FILE"
+        else
+          note "Could not rule out a created Pod; pending state is retained for cleanup."
+        fi
+      else
+        rm -f "$STATE_FILE"
+      fi
+      die "Pod creation failed ($error_code): $(jq -r '.error // "unknown error"' <<< "$error_json")"
+    }
+  elif ! output=$(runpod "${create_args[@]}" 2>"$create_error"); then
     error_json=$(jq -Rn '[inputs | fromjson? | select(type == "object")] | first // {}' < "$create_error")
     id=$(jq -r '.id // empty' <<< "$error_json")
     error_code=$(jq -r '.code // "unknown"' <<< "$error_json")
@@ -405,9 +611,12 @@ up() {
     --arg engine "$PROFILE_ENGINE" --arg image "$PROFILE_IMAGE" --arg model "$PROFILE_MODEL" \
     --arg revision "$PROFILE_REVISION" --arg served "$PROFILE_SERVED_MODEL" \
     --argjson maxlen "$PROFILE_MAX_MODEL_LEN" --arg log_file "$PROFILE_LOG_FILE" \
-    --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg terminate "$terminate_after" \
-    '{pod_id:$id,gpu:$gpu,data_center:$dc,price_per_hour:$price,engine:$engine,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,log_file:$log_file,started_at:$started,terminate_after:$terminate}')"
+    --arg started "$started" --arg terminate "$terminate_after" \
+      '{pod_id:$id,gpu:$gpu,data_center:$dc,price_per_hour:$price,engine:$engine,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,log_file:$log_file,started_at:$started,terminate_after:$terminate}')"
 
+  (( RUNPOD_MIN_DOWNLOAD_MBPS == 0 )) || wait_for_ssh
+  update_state '.ssh_ready_at = $ready | .ssh_ready_seconds = ((($ready | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)' \
+    --arg ready "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   start_tunnel
   wait_for_server
   update_state '.ready_at = $ready | .startup_seconds = ((($ready | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)' \
@@ -419,12 +628,31 @@ up() {
 }
 
 down() {
-  local id tunnel_pid monitor_pid
+  local id tunnel_pid monitor_pid pending terminate_epoch now
   if [[ ! -r "$STATE_FILE" ]]; then
     note "No local Pod state."
     return 0
   fi
   id=$(pod_id || true)
+  pending=$(state_value '.pending_pod_name // empty' || true)
+  if [[ -z "$id" && -n "$pending" ]]; then
+    validate_reconcile_settings
+    if reconcile_graphql_create "$pending"; then
+      rm -f "$STATE_FILE"
+      note "Pending GraphQL creation reconciled; no Pod remains."
+      return 0
+    fi
+    id=$(pod_id || true)
+    [[ -z "$id" ]] || die "Deletion failed for reconciled Pod $id; state retained."
+    terminate_epoch=$(state_value '.terminate_after | fromdateiso8601' || printf '0')
+    now=$(date +%s)
+    if (( terminate_epoch > 0 && now >= terminate_epoch )) && pending_pod_absent "$pending"; then
+      rm -f "$STATE_FILE"
+      note "Hard termination has passed and Runpod confirms no matching Pod; local state cleared."
+      return 0
+    fi
+    die "Could not confirm cleanup for pending Pod name $pending; state retained."
+  fi
   tunnel_pid=$(state_value '.tunnel_pid // empty' || true)
   monitor_pid=$(state_value '.monitor_pid // empty' || true)
   [[ "$monitor_pid" == "$$" ]] || { pid_matches "$monitor_pid" 'opencode-gpu.*_monitor' && kill "$monitor_pid" 2>/dev/null || true; }
@@ -438,12 +666,19 @@ down() {
 }
 
 status() {
-  local id remote tunnel_pid monitor_pid
+  local id remote tunnel_pid monitor_pid pending matches
   if [[ ! -r "$STATE_FILE" ]]; then
     printf 'Status: down\n'
     return 0
   fi
-  id=$(pod_id)
+  id=$(pod_id || true)
+  pending=$(state_value '.pending_pod_name // empty' || true)
+  if [[ -z "$id" && -n "$pending" ]]; then
+    matches=$(runpod pod list --all 2>/dev/null | jq -c --arg name "$pending" '[.[]? | select(.name == $name)]' || printf 'null')
+    jq -n --arg name "$pending" --argjson matches "$matches" \
+      '{status:"creation_unknown",pending_pod_name:$name,matching_pods:$matches}'
+    return 0
+  fi
   tunnel_pid=$(state_value '.tunnel_pid // empty' || true)
   monitor_pid=$(state_value '.monitor_pid // empty' || true)
   remote=$(runpod pod get "$id" 2>/dev/null || true)
@@ -452,7 +687,7 @@ status() {
     --argjson remote "${remote:-null}" \
     --arg tunnel "$([[ -n "$tunnel_pid" ]] && pid_alive "$tunnel_pid" && printf running || printf stopped)" \
     --arg monitor "$([[ -n "$monitor_pid" ]] && pid_alive "$monitor_pid" && printf running || printf stopped)" \
-    '{pod_id:$local.pod_id,gpu:$local.gpu,engine:($local.engine // "vllm"),model:($local.model // null),max_model_len:($local.max_model_len // null),data_center:$local.data_center,price_per_hour:$local.price_per_hour,startup_seconds:($local.startup_seconds // null),terminate_after:$local.terminate_after,tunnel:$tunnel,idle_monitor:$monitor,runpod_status:($remote.runtimeStatus // $remote.desiredStatus // "unknown")}'
+    '{pod_id:$local.pod_id,gpu:$local.gpu,engine:($local.engine // "vllm"),model:($local.model // null),max_model_len:($local.max_model_len // null),data_center:$local.data_center,price_per_hour:$local.price_per_hour,ssh_ready_seconds:($local.ssh_ready_seconds // null),startup_seconds:($local.startup_seconds // null),terminate_after:$local.terminate_after,tunnel:$tunnel,idle_monitor:$monitor,runpod_status:($remote.runtimeStatus // $remote.desiredStatus // "unknown")}'
 }
 
 logs() {
@@ -510,6 +745,8 @@ plan() {
   IFS=$'\t' read -r gpu dc price <<< "$selection"
   configure_profile "$gpu"
   validate_profile_image
+  validate_min_download
+  validate_reconcile_settings
   if [[ "$PROFILE_ENGINE" == llama_cpp ]]; then
     health_timeout=$LLAMA_CPP_HEALTH_TIMEOUT_SECONDS
   else
@@ -519,9 +756,10 @@ plan() {
     --arg engine "$PROFILE_ENGINE" --arg model "$PROFILE_MODEL" --arg revision "$PROFILE_REVISION" \
     --arg served "$PROFILE_SERVED_MODEL" --argjson maxlen "$PROFILE_MAX_MODEL_LEN" \
     --argjson disk "$RUNPOD_CONTAINER_DISK_GB" --argjson health_timeout "$health_timeout" \
+    --argjson min_download "$RUNPOD_MIN_DOWNLOAD_MBPS" \
     --argjson max_minutes "$RUNPOD_MAX_SESSION_MINUTES" --arg volume "$RUNPOD_NETWORK_VOLUME_ID" \
     --arg volume_dc "${NETWORK_VOLUME_DC:-}" --argjson volume_size "${NETWORK_VOLUME_SIZE_GB:-null}" \
-    '{billable_resource_created:false,gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,engine:$engine,container_disk_gb:$disk,startup_timeout_seconds:$health_timeout,max_session_minutes:$max_minutes,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,network_volume:(if $volume == "" then null else {id:$volume,data_center:$volume_dc,size_gb:$volume_size} end)}'
+    '{billable_resource_created:false,gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,engine:$engine,container_disk_gb:$disk,min_download_mbps:$min_download,startup_timeout_seconds:$health_timeout,max_session_minutes:$max_minutes,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,network_volume:(if $volume == "" then null else {id:$volume,data_center:$volume_dc,size_gb:$volume_size} end)}'
 }
 
 monitor() {

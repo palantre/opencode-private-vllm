@@ -116,6 +116,7 @@ mutable image tags for every engine. Defaults are:
   A100 SXM4 80 GB
 - Secure Cloud EU/EEA placement only
 - Maximum GPU price: `$1.50/hour`
+- Minimum advertised host download speed: 100 Mbps
 - L40S/RTX 6000 Ada/L40: `Qwen/Qwen3.8-27B-FP8` at revision
   `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, vLLM, 32,768-token context,
   16 sequences, and FP8 KV cache
@@ -131,6 +132,12 @@ mutable image tags for every engine. Defaults are:
 - Startup readiness timeout: 20 minutes for vLLM and 60 minutes for llama.cpp
 - Hard session termination: 240 minutes
 
+Set `RUNPOD_FORCE_LLAMA_CPP=1` to serve the same Q4_K_M artifact on every
+configured 5090, 4090, RTX PRO 4500 Blackwell, RTX 6000 Ada, L40, L40S, RTX
+A6000, or A100 fallback.
+This is useful when those GPU types share one persistent GGUF cache; the default
+remains `0`, preserving the vLLM/FP8 profiles on 48 GB and 80 GB GPUs.
+
 The stable OpenAI model ID remains `qwen3.8-27b-fp8` for compatibility with the
 installed OpenCode provider, even when the selected backend serves Q4_K_M. It is
 an API routing alias in this project, not a claim about the active quantization.
@@ -139,6 +146,15 @@ must update `RUNPOD_GPU_IDS` explicitly to opt into the expanded GPU list.
 The default `$1.50/hour` ceiling currently allows the A100 80 GB PCIe list price
 but excludes A100 SXM4 80 GB at `$1.59/hour`; current Runpod inventory and prices
 remain authoritative.
+
+Runpod's current `runpodctl pod create` command does not expose the scheduler's
+download-speed constraint. When `RUNPOD_MIN_DOWNLOAD_MBPS` is greater than zero,
+the lifecycle CLI creates the Pod through Runpod GraphQL and sends that value as
+`minDownload`; all later reads, SSH handling, and deletion still use
+`runpodctl`. Set it to `0` to use `runpodctl` for creation as well. The threshold
+filters on host network capability reported to the scheduler; it does not
+guarantee real-time end-to-end throughput to Hugging Face or eliminate CDN and
+network-volume bottlenecks.
 
 Check actual stock and prices before the first session:
 
@@ -221,6 +237,81 @@ The RTX 4090 Q4_K_M cold start took 3,013 seconds, dominated by downloading the
 tokens/second. The temporary 25 GB network volume used for resumable validation
 was deleted.
 
+A second RTX 4090 cache trial on 2026-08-24 showed substantial cold-download
+variance. Filling a new 25 GB volume in `EU-RO-1` required two 3,600-second
+startup attempts plus a 1,241-second resumed attempt, at least 8,441 seconds of
+GPU time. With the completed GGUF, two subsequent Pods became ready in 4 and 14
+seconds. First-response latency was 1.345 seconds after filling the cache and
+1.343/1.599 seconds on the warm starts. The corresponding 20-request benchmarks
+were 39.22, 38.50, and 39.05 output tokens/second, showing no material serving
+penalty from the network volume. The full trial cost $1.8832 and all resources
+were deleted.
+
+The inventory snapshot at `2026-08-24T16:11:22Z` reported low RTX 4090 stock in
+`EU-RO-1`, `EUR-IS-1`, and `EUR-IS-2`. RTX 5090 stock was low in `EU-CZ-1` and
+`EUR-IS-1`; it was unavailable in `EU-RO-1`. L40S, L40, and A100 80 GB PCIe had
+no allowed EU/EEA stock. A volume therefore improves startup dramatically but
+also restricts fallback to GPUs available in its fixed datacenter. `EUR-IS-1`
+was the only volume-capable location in this snapshot reporting both RTX 5090
+and RTX 4090 stock.
+
+A later no-volume trial on 2026-08-24 tested three independent RTX 4090 Pods
+with `minDownload: 200` and a 30-minute hard limit. The `EUR-IS-2` Pod never
+reached SSH during 1,200 seconds and had only started pulling the container
+image when it was removed. Two `EU-RO-1` Pods reached SSH but did not finish the
+GGUF within the 1,500-second model timeout. On the instrumented repetition, SSH
+was ready in 61 seconds, but after 25 minutes 58 seconds curl had downloaded
+only 4,641 MiB of 15.6 GiB at an average 3,050 KiB/s, approximately 25 Mbps,
+with a projected total download time of 1 hour 29 minutes. RTX 5090 requests in
+`EU-CZ-1` and `EUR-NO-1` were rejected before allocation because no instance
+matched the requested specifications. The trial cost $0.8937, created no
+volumes, and left no resources running. This confirms that `minDownload`
+filters advertised host capacity but does not guarantee throughput to the
+Hugging Face CDN; ephemeral cold-start time remains highly variable.
+
+A no-volume vLLM trial later that day used `minDownload: 100` and the same
+30-minute hard limit. An L40S in `EUR-IS-2` reached SSH in 49 seconds and served
+the FP8 model in 1,471 seconds; its first API request returned HTTP 200 in 1.586
+seconds. An RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb in the same
+datacenter reached SSH in 60 seconds and became ready in 875 seconds, 596 seconds
+faster in this sample; a non-reasoning `READY` response completed in 0.418
+seconds. A100 80 GB PCIe and RTX 6000 Ada had no EU/EEA stock at test time. The
+two billable Pods cost $0.6206 as observed immediately after deletion, created
+no volumes, and left no resources running. The MIG profile is supported by the
+CLI but remains outside the default priority list until repeated measurements
+justify changing selection policy.
+
+An initial `EUR-IS-1` volume configuration was exercised on 2026-08-26. Capacity
+disappeared twice between inventory reads and creation, then a Secure Cloud RTX
+4090 was allocated and reached SSH in 115 seconds. The volume retained
+903,389,184 partial GGUF bytes before the deliberately stopped Pod was
+terminated; this partial fill cost $0.1710 and no inference server became ready.
+
+A subsequent 25-sample inventory study favored `EU-RO-1`, so the active 30 GB
+volume was moved there with priority RTX 5090, RTX 4090, RTX PRO 4500 Blackwell,
+then A100 80 GB PCIe. Two short RTX 5090 Pods validated the replacement: the
+second Pod recovered a marker written by the first and resumed the GGUF partial
+from 1,269,760 to 1,982,464 bytes in 15 seconds. Both Pods and the old
+`EUR-IS-1` volume were deleted after validation; only the `EU-RO-1` volume
+remains billable.
+
+The GGUF was then filled directly from Pods as requested. A one-hour RTX PRO
+4500 attempt made limited progress, after which an RTX 5090 resumed the partial
+and reached readiness in 2,345 seconds, including 103 seconds to SSH. The final
+16,810,714,496-byte file matched the pinned SHA-256. The RTX 5090 used 17,156
+MiB VRAM, returned the first `READY` response in 0.736 seconds, and completed the
+20-request benchmark without failures at 60.10 output tokens/second. A fresh
+RTX 5090 then validated the warm path: SSH was ready in 54 seconds, the API in
+57 seconds, and the first response took 0.639 seconds. Both Pods were deleted;
+the completed model remains on the `EU-RO-1` volume.
+
+The RTX PRO 4500 fallback was subsequently validated against the same warm
+volume. After one transient pre-allocation GraphQL error, a retry reached SSH in
+38 seconds and API readiness in 62 seconds. It used 16,882 MiB VRAM, returned a
+valid first response in 1.279 seconds, and completed all 20 benchmark requests
+at 34.68 output tokens/second. It is therefore a functional lower-cost fallback,
+although its measured throughput was about 42% below the RTX 5090 result.
+
 A 50 GB network-volume trial in `EUR-IS-1` used 29 GB for the model cache. Two
 successful A100 starts took 256 and 267 seconds, so a warm cache produced no
 measurable startup improvement. The unencrypted trial volume was deleted and
@@ -245,5 +336,7 @@ opencode-gpu down
 Never delete `~/.local/state/opencode-gpu/state.json` merely to clear an error;
 doing so can orphan a billable Pod. Confirm termination in Runpod first.
 
-Logs are always in `~/.local/state/opencode-gpu/`. The generated API key and lifecycle
-configuration are in `~/.config/opencode-gpu/` with user-only permissions.
+Logs are always in `~/.local/state/opencode-gpu/`. Failed startup diagnostics
+also preserve the last lifecycle state and up to 200 KB of the remote engine
+log before termination. The generated API key and lifecycle configuration are
+in `~/.config/opencode-gpu/` with user-only permissions.

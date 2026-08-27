@@ -7,13 +7,21 @@ trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
 export PATH="$ROOT/tests/mock-bin:$PATH"
 export MOCK_LOG="$TMP/runpodctl.log"
+export MOCK_GRAPHQL_LOG="$TMP/graphql.json"
+export MOCK_CURL_HEADER_LOG="$TMP/curl-header.log"
+export MOCK_SSH_LOG="$TMP/ssh.log"
+export MOCK_LIST_COUNT="$TMP/list-count"
+export MOCK_PENDING_SEEN="$TMP/pending-seen"
 export MOCK_DELETED="$TMP/deleted"
 export OPENCODE_GPU_CONFIG_DIR="$TMP/config"
 export OPENCODE_GPU_STATE_DIR="$TMP/state"
 export OPENCODE_GPU_MONITOR_INTERVAL_SECONDS=60
 export OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS=5
-mkdir -p "$HOME" "$OPENCODE_GPU_CONFIG_DIR" "$OPENCODE_GPU_STATE_DIR"
+export OPENCODE_GPU_RECONCILE_ATTEMPTS=4
+export OPENCODE_GPU_RECONCILE_INTERVAL_SECONDS=0
+mkdir -p "$HOME/.runpod" "$OPENCODE_GPU_CONFIG_DIR" "$OPENCODE_GPU_STATE_DIR"
 printf '%s\n' test-private-key > "$OPENCODE_GPU_CONFIG_DIR/vllm-api-key"
+printf '%s\n' "apikey = 'mock-api-key'" "apiurl = 'https://api.runpod.io/graphql'" > "$HOME/.runpod/config.toml"
 cat > "$OPENCODE_GPU_CONFIG_DIR/config" <<'CONFIG'
 RUNPOD_IMAGE=example.invalid/private-vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 RUNPOD_LLAMA_CPP_IMAGE=example.invalid/private-llama-cpp@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -31,9 +39,10 @@ assert_log() {
 }
 
 bash -n "$ROOT/config/opencode-gpu.env.example"
-plan=$(env -u OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS "$ROOT/bin/opencode-gpu" plan)
-jq -e '.engine == "vllm" and .startup_timeout_seconds == 1200' <<< "$plan" >/dev/null || \
+plan=$(env -u OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS -u RUNPOD_MIN_DOWNLOAD_MBPS "$ROOT/bin/opencode-gpu" plan)
+jq -e '.engine == "vllm" and .startup_timeout_seconds == 1200 and .min_download_mbps == 100' <<< "$plan" >/dev/null || \
   fail 'vLLM plan did not report its startup timeout'
+export RUNPOD_MIN_DOWNLOAD_MBPS=0
 "$ROOT/bin/opencode-gpu" up >/dev/null
 [[ -r "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'up did not create state'
 [[ $(jq -r '.pod_id' "$OPENCODE_GPU_STATE_DIR/state.json") == mock-pod-123 ]] || fail 'wrong Pod id'
@@ -55,6 +64,109 @@ fi
 "$ROOT/bin/opencode-gpu" down >/dev/null
 [[ -e "$MOCK_DELETED" ]] || fail 'down did not terminate the Pod'
 [[ ! -e "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'down retained state after confirmed deletion'
+
+rm -f "$MOCK_DELETED"
+export RUNPOD_MIN_DOWNLOAD_MBPS=200
+"$ROOT/bin/opencode-gpu" up >/dev/null
+[[ -e "$MOCK_PENDING_SEEN" ]] || fail 'GraphQL create did not persist pending ownership before the mutation'
+jq -e '.variables.input.minDownload == 200 and .variables.input.startSsh == true and .variables.input.ports == "22/tcp" and .variables.input.terminateAfter != null' "$MOCK_GRAPHQL_LOG" >/dev/null || \
+  fail 'GraphQL create did not include the bandwidth and lifecycle constraints'
+[[ $(<"$MOCK_CURL_HEADER_LOG") == 'Authorization: Bearer mock-api-key' ]] || \
+  fail 'GraphQL create did not load the Runpod credential as an authorization header'
+if grep -F -- 'mock-api-key' "$MOCK_GRAPHQL_LOG" >/dev/null; then
+  fail 'GraphQL create leaked the Runpod credential into its payload'
+fi
+grep -F -- ' true ' "$MOCK_SSH_LOG" >/dev/null || fail 'GraphQL create did not probe SSH before tunneling'
+"$ROOT/bin/opencode-gpu" down >/dev/null
+export RUNPOD_MIN_DOWNLOAD_MBPS=0
+
+export RUNPOD_MIN_DOWNLOAD_MBPS=200
+export MOCK_GRAPHQL_UNREACHABLE=1
+if "$ROOT/bin/opencode-gpu" up >/dev/null 2>&1; then
+  fail 'unreachable GraphQL request unexpectedly succeeded'
+fi
+unset MOCK_GRAPHQL_UNREACHABLE
+[[ ! -e "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'unsent GraphQL request retained false pending state'
+export RUNPOD_MIN_DOWNLOAD_MBPS=0
+
+export RUNPOD_MIN_DOWNLOAD_MBPS=200
+export MOCK_GRAPHQL_REJECTED=1
+if "$ROOT/bin/opencode-gpu" up >/dev/null 2>&1; then
+  fail 'rejected GraphQL request unexpectedly succeeded'
+fi
+unset MOCK_GRAPHQL_REJECTED
+[[ ! -e "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'rejected GraphQL request retained false pending state'
+export RUNPOD_MIN_DOWNLOAD_MBPS=0
+
+export RUNPOD_MIN_DOWNLOAD_MBPS=200
+export MOCK_GRAPHQL_AMBIGUOUS=1
+for curl_status in 27 80; do
+  rm -f "$MOCK_DELETED"
+  export MOCK_GRAPHQL_AMBIGUOUS_STATUS=$curl_status
+  if "$ROOT/bin/opencode-gpu" up >/dev/null 2>&1; then
+    fail "ambiguous curl status $curl_status unexpectedly succeeded"
+  fi
+  [[ -e "$MOCK_DELETED" ]] || fail "ambiguous curl status $curl_status orphaned its billable Pod"
+  [[ ! -e "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail "ambiguous curl status $curl_status retained state after cleanup"
+done
+unset MOCK_GRAPHQL_AMBIGUOUS MOCK_GRAPHQL_AMBIGUOUS_STATUS
+export RUNPOD_MIN_DOWNLOAD_MBPS=0
+
+rm -f "$MOCK_DELETED"
+export RUNPOD_MIN_DOWNLOAD_MBPS=200
+export MOCK_GRAPHQL_AMBIGUOUS=1
+export MOCK_LIST_HIDDEN_ATTEMPTS=2
+rm -f "$MOCK_LIST_COUNT"
+if "$ROOT/bin/opencode-gpu" up >/dev/null 2>&1; then
+  fail 'ambiguous GraphQL create unexpectedly succeeded'
+fi
+unset MOCK_GRAPHQL_AMBIGUOUS
+unset MOCK_LIST_HIDDEN_ATTEMPTS
+if [[ ! -e "$MOCK_DELETED" ]]; then
+  printf 'Reconcile calls: %s\n' "$(<"$MOCK_LIST_COUNT")" >&2
+  [[ ! -r "$OPENCODE_GPU_STATE_DIR/state.json" ]] || jq . "$OPENCODE_GPU_STATE_DIR/state.json" >&2
+  fail 'ambiguous GraphQL create orphaned its billable Pod'
+fi
+[[ ! -e "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'ambiguous GraphQL cleanup retained state'
+export MOCK_GRAPHQL_AMBIGUOUS=1
+export MOCK_LIST_FAIL=1
+if "$ROOT/bin/opencode-gpu" up >/dev/null 2>&1; then
+  fail 'unreconciled GraphQL create unexpectedly succeeded'
+fi
+unset MOCK_GRAPHQL_AMBIGUOUS MOCK_LIST_FAIL
+[[ $(jq -r '.pending_pod_name // empty' "$OPENCODE_GPU_STATE_DIR/state.json") == opencode-private-gpu-* ]] ||
+  fail 'unreconciled GraphQL create did not retain pending state'
+if "$ROOT/bin/opencode-gpu" down >/dev/null 2>&1; then
+  fail 'pending GraphQL state was cleared before finding the Pod or reaching hard termination'
+fi
+[[ -e "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'unconfirmed GraphQL cleanup discarded pending state'
+export MOCK_GRAPHQL_AMBIGUOUS=1
+"$ROOT/bin/opencode-gpu" down >/dev/null
+unset MOCK_GRAPHQL_AMBIGUOUS
+[[ ! -e "$OPENCODE_GPU_STATE_DIR/state.json" ]] || fail 'pending GraphQL state was not cleared after successful reconciliation'
+export MOCK_GRAPHQL_AMBIGUOUS=1
+export MOCK_DELETE_FAIL=1
+if "$ROOT/bin/opencode-gpu" up >/dev/null 2>&1; then
+  fail 'GraphQL create with failed orphan deletion unexpectedly succeeded'
+fi
+unset MOCK_GRAPHQL_AMBIGUOUS MOCK_DELETE_FAIL
+[[ $(jq -r '.pod_id // empty' "$OPENCODE_GPU_STATE_DIR/state.json") == mock-pod-123 ]] ||
+  fail 'failed GraphQL orphan deletion discarded the known Pod id'
+"$ROOT/bin/opencode-gpu" down >/dev/null
+export RUNPOD_MIN_DOWNLOAD_MBPS=08
+if "$ROOT/bin/opencode-gpu" plan >/dev/null 2>&1; then
+  fail 'plan accepted a download threshold with a leading zero'
+fi
+export RUNPOD_MIN_DOWNLOAD_MBPS=2147483648
+if "$ROOT/bin/opencode-gpu" plan >/dev/null 2>&1; then
+  fail 'plan accepted a download threshold above GraphQL Int range'
+fi
+export RUNPOD_MIN_DOWNLOAD_MBPS=0
+export OPENCODE_GPU_RECONCILE_ATTEMPTS=0
+if "$ROOT/bin/opencode-gpu" plan >/dev/null 2>&1; then
+  fail 'plan accepted zero GraphQL reconciliation attempts'
+fi
+export OPENCODE_GPU_RECONCILE_ATTEMPTS=4
 
 rm -f "$MOCK_DELETED"
 "$ROOT/bin/opencode-gpu" up >/dev/null
@@ -133,6 +245,38 @@ printf '%s\n' \
 assert_log 'KV_CACHE_DTYPE'
 assert_log 'auto'
 "$ROOT/bin/opencode-gpu" down >/dev/null
+unset MOCK_GPU_SCENARIO
+
+export MOCK_GPU_SCENARIO=pro6000-mig
+printf '%s\n' \
+  'RUNPOD_IMAGE=example.invalid/private-vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  'RUNPOD_GPU_IDS="NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb"' \
+  'RUNPOD_MAX_PRICE_PER_HOUR=1.20' > "$OPENCODE_GPU_CONFIG_DIR/config"
+plan=$("$ROOT/bin/opencode-gpu" plan)
+jq -e '.gpu == "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb" and .engine == "vllm"' <<< "$plan" >/dev/null || \
+  fail 'RTX PRO 6000 MIG 48 GB profile was not selected'
+unset MOCK_GPU_SCENARIO
+
+export MOCK_GPU_SCENARIO=default
+printf '%s\n' \
+  'RUNPOD_IMAGE=example.invalid/private-vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  'RUNPOD_LLAMA_CPP_IMAGE=example.invalid/private-llama-cpp@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  'RUNPOD_FORCE_LLAMA_CPP=1' \
+  'RUNPOD_MAX_PRICE_PER_HOUR=1.20' > "$OPENCODE_GPU_CONFIG_DIR/config"
+plan=$("$ROOT/bin/opencode-gpu" plan)
+jq -e '.gpu == "NVIDIA L40S" and .engine == "llama_cpp" and .model == "Chungulus/Qwen3.8-27B-Q4_K_M-GGUF"' <<< "$plan" >/dev/null || \
+  fail 'forced llama.cpp profile did not route L40S to Q4_K_M'
+unset MOCK_GPU_SCENARIO
+
+export MOCK_GPU_SCENARIO=pro4500
+printf '%s\n' \
+  'RUNPOD_LLAMA_CPP_IMAGE=example.invalid/private-llama-cpp@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  'RUNPOD_FORCE_LLAMA_CPP=1' \
+  'RUNPOD_GPU_IDS="NVIDIA RTX PRO 4500 Blackwell"' \
+  'RUNPOD_MAX_PRICE_PER_HOUR=1.20' > "$OPENCODE_GPU_CONFIG_DIR/config"
+plan=$("$ROOT/bin/opencode-gpu" plan)
+jq -e '.gpu == "NVIDIA RTX PRO 4500 Blackwell" and .engine == "llama_cpp" and .max_model_len == 32768' <<< "$plan" >/dev/null || \
+  fail 'forced llama.cpp profile did not route RTX PRO 4500 Blackwell to Q4_K_M'
 unset MOCK_GPU_SCENARIO
 
 rm -f "$MOCK_DELETED"

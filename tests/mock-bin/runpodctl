@@ -37,6 +37,30 @@ JSON
 ]
 JSON
         ;;
+      pro6000-mig)
+        cat <<'JSON'
+[
+  {
+    "gpuId": "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
+    "secureCloud": true,
+    "securePricePerHr": 1.09,
+    "dataCenterAvailability": [{"dataCenterId": "EUR-IS-2", "stockStatus": "Low"}]
+  }
+]
+JSON
+        ;;
+      pro4500)
+        cat <<'JSON'
+[
+  {
+    "gpuId": "NVIDIA RTX PRO 4500 Blackwell",
+    "secureCloud": true,
+    "securePricePerHr": 0.72,
+    "dataCenterAvailability": [{"dataCenterId": "EU-RO-1", "stockStatus": "Medium"}]
+  }
+]
+JSON
+        ;;
       llama-a100)
         cat <<'JSON'
 [
@@ -110,7 +134,31 @@ JSON
   'pod get')
     printf '%s\n' '{"id":"mock-pod-123","runtimeStatus":"running"}'
     ;;
+  'pod list')
+    if [[ "${MOCK_LIST_FAIL:-0}" == 1 ]]; then
+      printf '%s\n' '{"error":"temporary list failure","code":"network_error"}' >&2
+      exit 1
+    fi
+    if [[ "${MOCK_GRAPHQL_AMBIGUOUS:-0}" == 1 ]]; then
+      count=0
+      [[ ! -r "$MOCK_LIST_COUNT" ]] || count=$(<"$MOCK_LIST_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$MOCK_LIST_COUNT"
+      if (( count <= ${MOCK_LIST_HIDDEN_ATTEMPTS:-0} )); then
+        printf '%s\n' '[]'
+        exit 0
+      fi
+      name=$(jq -r '.variables.input.name' "$MOCK_GRAPHQL_LOG")
+      jq -cn --arg name "$name" '[{id:"mock-pod-123",name:$name,runtimeStatus:"running"}]'
+    else
+      printf '%s\n' '[]'
+    fi
+    ;;
   'pod delete')
+    if [[ "${MOCK_DELETE_FAIL:-0}" == 1 ]]; then
+      printf '%s\n' '{"error":"temporary delete failure","code":"network_error"}' >&2
+      exit 1
+    fi
     if [[ "${MOCK_DELETE_NOT_FOUND:-0}" == 1 ]]; then
       printf '%s\n' '{"error":"pod not found","code":"not_found"}' >&2
       exit 1
