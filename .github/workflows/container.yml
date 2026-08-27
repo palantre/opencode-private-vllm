@@ -56,6 +56,26 @@ jobs:
       - name: Check unprivileged inference user
         run: |
           test "$(docker run --rm --entrypoint gosu "${{ steps.meta.outputs.tags }}" inference id -u)" != 0
+      - name: Check clinical vLLM isolation
+        if: matrix.name == 'vllm'
+        run: |
+          set -euo pipefail
+          test_root=$(mktemp -d)
+          cat > "$test_root/fake-vllm" <<'SCRIPT'
+          #!/bin/sh
+          printf 'uid=%s\n' "$(id -u)"
+          touch "$HF_HOME/write-test"
+          rm "$HF_HOME/write-test"
+          printf 'ephemeral_cache_writable=yes\n'
+          SCRIPT
+          chmod 0755 "$test_root/fake-vllm"
+          output=$(docker run --rm \
+            -e CLINICAL_MODE=1 \
+            -e MODEL_CACHE_DIR=/var/lib/opencode-gpu/huggingface \
+            -v "$test_root/fake-vllm:/usr/local/bin/vllm:ro" \
+            "${{ steps.meta.outputs.tags }}")
+          grep -E 'uid=[1-9][0-9]*' <<< "$output"
+          grep -F 'ephemeral_cache_writable=yes' <<< "$output"
       - name: Check clinical llama.cpp isolation
         if: matrix.name == 'llama-cpp'
         run: |
@@ -74,10 +94,21 @@ jobs:
             exit 90
           fi
           printf 'workspace_writable=no\n'
-          trap 'exit 0' TERM INT
+          on_term() {
+            sleep 2
+            if test -e /workspace/runtime-canary; then
+              printf 'canary_present_during_child_stop=yes\n' > /test-output/child-stop
+            else
+              printf 'canary_present_during_child_stop=no\n' > /test-output/child-stop
+            fi
+            exit 0
+          }
+          trap on_term TERM INT
           while :; do sleep 1; done
           SCRIPT
           chmod 0755 "$test_root/fake-server"
+          mkdir "$test_root/output"
+          chmod 0777 "$test_root/output"
           docker run -d --name clinical-llama-test \
             -e CLINICAL_MODE=1 \
             -e MODEL_CACHE_DIR=/workspace/llama.cpp \
@@ -85,6 +116,7 @@ jobs:
             -e MODEL_SHA256="$model_sha" \
             -v "$workspace:/workspace" \
             -v "$test_root/fake-server:/app/llama-server:ro" \
+            -v "$test_root/output:/test-output" \
             "${{ steps.meta.outputs.tags }}"
           trap 'docker rm -f clinical-llama-test clinical-llama-reject >/dev/null 2>&1 || true' EXIT
           for _ in $(seq 1 30); do
@@ -94,7 +126,11 @@ jobs:
           docker logs clinical-llama-test 2>&1 | grep -E 'uid=[1-9][0-9]*'
           docker logs clinical-llama-test 2>&1 | grep -F 'workspace_writable=no'
           test ! -e "$workspace/llama.cpp/model.gguf.partial"
+          sudo chmod 0755 "$workspace"
+          printf 'synthetic runtime file\n' | sudo tee "$workspace/runtime-canary" >/dev/null
           docker stop -t 10 clinical-llama-test
+          grep -F 'canary_present_during_child_stop=yes' "$test_root/output/child-stop"
+          test ! -e "$workspace/runtime-canary"
           docker rm clinical-llama-test
           sudo chmod 0755 "$workspace" "$workspace/llama.cpp"
           printf 'do not delete\n' | sudo tee "$workspace/unexpected" >/dev/null

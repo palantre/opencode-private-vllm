@@ -340,6 +340,16 @@ valid first response in 1.279 seconds, and completed all 20 benchmark requests
 at 34.68 output tokens/second. It is therefore a functional lower-cost fallback,
 although its measured throughput was about 42% below the RTX 5090 result.
 
+Clinical mode was validated on the warm volume on 2026-08-27. A preflight audit
+found only the verified GGUF and a 34-byte synthetic marker from an earlier
+volume test; the marker was inspected and removed before enabling the mode. An
+RTX 4090 reached API readiness in 56 seconds with llama.cpp running as UID 999,
+the model and directories at modes 0444/0555, and an inference-user write test
+denied. A synthetic prompt returned successfully and appeared in neither the
+volume nor the disabled server log. An orderly shutdown removed a separate
+synthetic root-created file, and a confirming RTX 5090 start reached readiness
+in 29 seconds with only the GGUF remaining. All validation Pods were deleted.
+
 A 50 GB network-volume trial in `EUR-IS-1` used 29 GB for the model cache. Two
 successful A100 starts took 256 and 267 seconds, so a warm cache produced no
 measurable startup improvement. The unencrypted trial volume was deleted and

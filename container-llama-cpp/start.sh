@@ -26,16 +26,39 @@ model_path="$MODEL_CACHE_DIR/$MODEL_FILE"
 partial_path="$model_path.partial"
 
 clinical_validate_volume() {
+  local unexpected candidate
   [[ "$CLINICAL_MODE" == 1 && "$MODEL_CACHE_DIR" == /workspace/* ]] || return 0
-  if find /workspace -mindepth 1 -maxdepth 1 ! -path "$MODEL_CACHE_DIR" -print -quit | grep -q .; then
+  [[ "$MODEL_CACHE_DIR" == /workspace/llama.cpp ]] || {
+    printf 'Clinical mode requires MODEL_CACHE_DIR=/workspace/llama.cpp on a network volume.\n' >&2
+    exit 1
+  }
+  [[ -d /workspace && ! -L /workspace && -d "$MODEL_CACHE_DIR" && ! -L "$MODEL_CACHE_DIR" ]] || {
+    printf 'Clinical mode requires real, non-symlink workspace and model-cache directories.\n' >&2
+    exit 1
+  }
+  if ! unexpected=$(find /workspace -mindepth 1 -maxdepth 1 ! -path "$MODEL_CACHE_DIR" -print -quit); then
+    printf 'Clinical mode could not audit the network-volume root.\n' >&2
+    exit 1
+  fi
+  if [[ -n "$unexpected" ]]; then
     printf 'Clinical mode requires a dedicated model-only volume; unexpected top-level content was not deleted.\n' >&2
     exit 1
   fi
-  if find "$MODEL_CACHE_DIR" -mindepth 1 -maxdepth 1 \
-      ! -name "$MODEL_FILE" ! -name "$MODEL_FILE.partial" -print -quit | grep -q .; then
+  if ! unexpected=$(find "$MODEL_CACHE_DIR" -mindepth 1 -maxdepth 1 \
+      ! -name "$MODEL_FILE" ! -name "$MODEL_FILE.partial" -print -quit); then
+    printf 'Clinical mode could not audit the model cache.\n' >&2
+    exit 1
+  fi
+  if [[ -n "$unexpected" ]]; then
     printf 'Clinical mode found unexpected model-cache content and did not delete it.\n' >&2
     exit 1
   fi
+  for candidate in "$model_path" "$partial_path"; do
+    [[ ! -L "$candidate" && ( ! -e "$candidate" || -f "$candidate" ) ]] || {
+      printf 'Clinical mode permits only regular model and partial files.\n' >&2
+      exit 1
+    }
+  done
 }
 
 clinical_cleanup() {
