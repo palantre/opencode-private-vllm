@@ -13,8 +13,8 @@ The vLLM/FP8 route passed on a Secure Cloud L40S in `EUR-IS-2` on 2026-08-23.
 The llama.cpp/Q4_K_M route passed on a Secure Cloud RTX 4090 in `EU-RO-1` on
 2026-08-24. Startup, SSH-only forwarding, OpenAI chat completions, structured
 tool calls, the OpenCode agent, benchmarking, and explicit termination completed
-successfully. Mocked tests cover idle termination for both engines. No Pod or
-network volume was left running.
+successfully. Mocked tests cover idle termination for both engines. No Pod was
+left running; the current model-only network volume is documented below.
 
 Do not process clinical or identifiable data until your organization has
 approved Runpod for that purpose and reviewed or signed the applicable DPA.
@@ -117,6 +117,7 @@ mutable image tags for every engine. Defaults are:
 - Secure Cloud EU/EEA placement only
 - Maximum GPU price: `$1.50/hour`
 - Minimum advertised host download speed: 100 Mbps
+- Clinical mode enabled by default
 - L40S/RTX 6000 Ada/L40: `Qwen/Qwen3.8-27B-FP8` at revision
   `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, vLLM, 32,768-token context,
   16 sequences, and FP8 KV cache
@@ -168,6 +169,10 @@ configured ceiling. Runpod availability and pricing remain the final source of
 truth.
 
 ## Use
+
+For the exact day-to-day procedure on the installed Ubuntu machine, including
+the recommended protected TUI session, the Desktop workflow, shutdown checks,
+and recovery, see [GUIA_DE_USO.md](GUIA_DE_USO.md).
 
 ```bash
 opencode-gpu plan
@@ -225,6 +230,29 @@ cache; never store prompts, clinical data, credentials, or other sensitive
 artifacts there. The vLLM cache path is `/workspace/huggingface`; the llama.cpp
 cache path is `/workspace/llama.cpp`; runtime logs remain on ephemeral container
 storage.
+
+`RUNPOD_CLINICAL_MODE=1` is the default. With llama.cpp, it keeps the persistent
+GGUF cache but treats the network volume as model-only storage: unexpected
+entries are rejected without deleting them, the pinned model is
+checksum-verified, the inference server runs as an unprivileged user, and
+`/workspace` is read-only to that user. Runpod still mounts the volume read-write
+for the root startup process. Prompt-reuse caches and server logging are
+disabled, and the container removes non-model entries on an orderly shutdown.
+Prevention is the primary control because cleanup cannot be guaranteed after a
+host failure or forced kill. Clinical mode rejects vLLM with a network volume
+because the Hugging Face cache requires write access; vLLM remains available
+with ephemeral storage. Set `RUNPOD_CLINICAL_MODE=0` only for an explicitly
+non-clinical session.
+
+The CLI also refuses clinical mode unless the selected immutable image digest is
+listed in `RUNPOD_CLINICAL_APPROVED_IMAGE_DIGESTS`. This prevents an existing
+configuration from silently claiming clinical controls while still pointing at
+an older image that does not implement them.
+
+These controls do not make Runpod automatically suitable for identifiable
+clinical data. Prompt contents still reach the inference process in plaintext,
+local OpenCode history is outside this volume policy, and organizational
+approval plus the applicable DPA remain required.
 
 The validated ephemeral baseline was 359 seconds to readiness. A 20-request
 synthetic burst completed without failures at 174.76 output tokens/second, with

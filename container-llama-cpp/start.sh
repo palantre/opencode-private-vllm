@@ -10,10 +10,41 @@ set -euo pipefail
 : "${PARALLEL:=1}"
 : "${MODEL_CACHE_DIR:=/root/.cache/llama.cpp}"
 : "${CACHE_TYPE:=q8_0}"
+: "${CLINICAL_MODE:=1}"
+
+[[ "$CLINICAL_MODE" == 0 || "$CLINICAL_MODE" == 1 ]] || {
+  printf 'CLINICAL_MODE must be 0 or 1.\n' >&2
+  exit 1
+}
+[[ "$MODEL_FILE" != */* && "$MODEL_FILE" != . && "$MODEL_FILE" != .. ]] || {
+  printf 'MODEL_FILE must be a basename.\n' >&2
+  exit 1
+}
 
 mkdir -p "$MODEL_CACHE_DIR" /var/log/opencode-gpu
 model_path="$MODEL_CACHE_DIR/$MODEL_FILE"
 partial_path="$model_path.partial"
+
+clinical_validate_volume() {
+  [[ "$CLINICAL_MODE" == 1 && "$MODEL_CACHE_DIR" == /workspace/* ]] || return 0
+  if find /workspace -mindepth 1 -maxdepth 1 ! -path "$MODEL_CACHE_DIR" -print -quit | grep -q .; then
+    printf 'Clinical mode requires a dedicated model-only volume; unexpected top-level content was not deleted.\n' >&2
+    exit 1
+  fi
+  if find "$MODEL_CACHE_DIR" -mindepth 1 -maxdepth 1 \
+      ! -name "$MODEL_FILE" ! -name "$MODEL_FILE.partial" -print -quit | grep -q .; then
+    printf 'Clinical mode found unexpected model-cache content and did not delete it.\n' >&2
+    exit 1
+  fi
+}
+
+clinical_cleanup() {
+  [[ "$CLINICAL_MODE" == 1 && "$MODEL_CACHE_DIR" == /workspace/* ]] || return 0
+  find /workspace -mindepth 1 -maxdepth 1 ! -path "$MODEL_CACHE_DIR" -exec rm -rf -- {} +
+  find "$MODEL_CACHE_DIR" -mindepth 1 -maxdepth 1 ! -name "$MODEL_FILE" -exec rm -rf -- {} +
+}
+
+clinical_validate_volume
 
 exec > >(tee -a /var/log/opencode-gpu/llama-cpp.log) 2>&1
 
@@ -43,7 +74,9 @@ if [[ ! -f "$model_path" ]] || ! printf '%s  %s\n' "$MODEL_SHA256" "$model_path"
   }
   mv "$partial_path" "$model_path"
 fi
-exec /app/llama-server \
+rm -f "$partial_path"
+
+server=(/app/llama-server
   --model "$model_path" \
   --alias "$SERVED_MODEL_NAME" \
   --host 127.0.0.1 \
@@ -58,4 +91,46 @@ exec /app/llama-server \
   --no-mmproj \
   --jinja \
   --metrics \
-  --no-webui
+  --no-webui)
+
+if [[ "$CLINICAL_MODE" == 0 ]]; then
+  exec "${server[@]}"
+fi
+
+server+=(--no-cache-prompt --cache-ram 0 --no-slots --log-disable)
+clinical_cleanup
+chown root:root "$MODEL_CACHE_DIR" "$model_path"
+chmod 0555 "$MODEL_CACHE_DIR"
+chmod 0444 "$model_path"
+if [[ "$MODEL_CACHE_DIR" == /workspace/* ]]; then
+  chown root:root /workspace
+  chmod 0555 /workspace
+fi
+if gosu inference test -w "$MODEL_CACHE_DIR" || gosu inference test -w "$model_path"; then
+  printf 'Clinical mode could not make the model cache read-only for the inference user.\n' >&2
+  exit 1
+fi
+
+export HOME=/var/lib/opencode-gpu
+export TMPDIR=/var/lib/opencode-gpu/tmp
+gosu inference "${server[@]}" &
+server_pid=$!
+terminate_server() {
+  kill -TERM "$server_pid" 2>/dev/null || true
+  terminate_requested=1
+}
+terminate_requested=0
+trap terminate_server TERM INT
+while :; do
+  if wait "$server_pid"; then
+    server_status=0
+    break
+  else
+    server_status=$?
+  fi
+  [[ "$terminate_requested" == 1 ]] && kill -0 "$server_pid" 2>/dev/null && continue
+  break
+done
+trap - TERM INT
+clinical_cleanup
+exit "$server_status"

@@ -19,6 +19,7 @@ export OPENCODE_GPU_MONITOR_INTERVAL_SECONDS=60
 export OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS=5
 export OPENCODE_GPU_RECONCILE_ATTEMPTS=4
 export OPENCODE_GPU_RECONCILE_INTERVAL_SECONDS=0
+export RUNPOD_CLINICAL_APPROVED_IMAGE_DIGESTS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 mkdir -p "$HOME/.runpod" "$OPENCODE_GPU_CONFIG_DIR" "$OPENCODE_GPU_STATE_DIR"
 printf '%s\n' test-private-key > "$OPENCODE_GPU_CONFIG_DIR/vllm-api-key"
 printf '%s\n' "apikey = 'mock-api-key'" "apiurl = 'https://api.runpod.io/graphql'" > "$HOME/.runpod/config.toml"
@@ -40,7 +41,7 @@ assert_log() {
 
 bash -n "$ROOT/config/opencode-gpu.env.example"
 plan=$(env -u OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS -u RUNPOD_MIN_DOWNLOAD_MBPS "$ROOT/bin/opencode-gpu" plan)
-jq -e '.engine == "vllm" and .startup_timeout_seconds == 1200 and .min_download_mbps == 100' <<< "$plan" >/dev/null || \
+jq -e '.clinical_mode == true and .engine == "vllm" and .startup_timeout_seconds == 1200 and .min_download_mbps == 100' <<< "$plan" >/dev/null || \
   fail 'vLLM plan did not report its startup timeout'
 export RUNPOD_MIN_DOWNLOAD_MBPS=0
 "$ROOT/bin/opencode-gpu" up >/dev/null
@@ -54,6 +55,8 @@ assert_log '--data-center-ids EUR-IS-2'
 assert_log '--ports 22/tcp'
 assert_log 'KV_CACHE_DTYPE'
 assert_log 'fp8'
+assert_log 'CLINICAL_MODE'
+assert_log '/var/lib/opencode-gpu/huggingface'
 if grep -F -- '8000/http' "$MOCK_LOG" >/dev/null; then
   fail 'vLLM HTTP port was exposed publicly'
 fi
@@ -301,14 +304,51 @@ printf '%s\n' \
   'RUNPOD_LLAMA_CPP_IMAGE=example.invalid/private-llama-cpp@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
   'RUNPOD_MAX_PRICE_PER_HOUR=1.20' \
   'RUNPOD_NETWORK_VOLUME_ID=mock-volume-123' > "$OPENCODE_GPU_CONFIG_DIR/config"
+if "$ROOT/bin/opencode-gpu" plan >/dev/null 2>&1; then
+  fail 'clinical mode accepted a writable vLLM cache on a network volume'
+fi
+printf '%s\n' 'RUNPOD_CLINICAL_MODE=0' >> "$OPENCODE_GPU_CONFIG_DIR/config"
 plan=$("$ROOT/bin/opencode-gpu" plan)
-jq -e '.data_center == "EUR-IS-2" and .network_volume == {id:"mock-volume-123",data_center:"EUR-IS-2",size_gb:50}' <<< "$plan" >/dev/null || \
+jq -e '.clinical_mode == false and .data_center == "EUR-IS-2" and .network_volume == {id:"mock-volume-123",data_center:"EUR-IS-2",size_gb:50,mount_access:"read-write",purpose:"unrestricted",inference_access:"read-write"}' <<< "$plan" >/dev/null || \
   fail 'plan did not validate and report the network volume'
 "$ROOT/bin/opencode-gpu" up >/dev/null
 assert_log '--network-volume-id mock-volume-123'
 assert_log '--volume-mount-path /workspace'
 "$ROOT/bin/opencode-gpu" down >/dev/null
 
+printf '%s\n' \
+  'RUNPOD_IMAGE=example.invalid/private-vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  'RUNPOD_LLAMA_CPP_IMAGE=example.invalid/private-llama-cpp@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  'RUNPOD_FORCE_LLAMA_CPP=1' \
+  'RUNPOD_NETWORK_VOLUME_ID=mock-volume-123' > "$OPENCODE_GPU_CONFIG_DIR/config"
+plan=$("$ROOT/bin/opencode-gpu" plan)
+jq -e '.clinical_mode == true and .engine == "llama_cpp" and .network_volume.mount_access == "read-write" and .network_volume.purpose == "model-cache-only" and .network_volume.inference_access == "read-only"' <<< "$plan" >/dev/null || \
+  fail 'clinical llama.cpp plan did not restrict the network volume to the model cache'
+: > "$MOCK_LOG"
+"$ROOT/bin/opencode-gpu" up >/dev/null
+assert_log 'CLINICAL_MODE'
+assert_log '/workspace/llama.cpp'
+"$ROOT/bin/opencode-gpu" down >/dev/null
+
+printf '%s\n' \
+  'RUNPOD_IMAGE=example.invalid/private-vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  'RUNPOD_CLINICAL_MODE=yes' > "$OPENCODE_GPU_CONFIG_DIR/config"
+if "$ROOT/bin/opencode-gpu" plan >/dev/null 2>&1; then
+  fail 'plan accepted an invalid clinical-mode value'
+fi
+
+export RUNPOD_CLINICAL_APPROVED_IMAGE_DIGESTS=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+printf '%s\n' \
+  'RUNPOD_IMAGE=example.invalid/private-vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$OPENCODE_GPU_CONFIG_DIR/config"
+if "$ROOT/bin/opencode-gpu" plan >/dev/null 2>&1; then
+  fail 'clinical mode accepted an image without an approved controls digest'
+fi
+export RUNPOD_CLINICAL_APPROVED_IMAGE_DIGESTS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+printf '%s\n' \
+  'RUNPOD_IMAGE=example.invalid/private-vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  'RUNPOD_LLAMA_CPP_IMAGE=example.invalid/private-llama-cpp@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  'RUNPOD_MAX_PRICE_PER_HOUR=1.20' > "$OPENCODE_GPU_CONFIG_DIR/config"
 rm -f "$MOCK_DELETED"
 export MOCK_CREATE_FAIL=1
 if "$ROOT/bin/opencode-gpu" up >/dev/null 2>&1; then

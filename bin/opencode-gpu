@@ -14,6 +14,8 @@ RUNPOD_POD_NAME=opencode-private-gpu
 RUNPOD_IMAGE=ghcr.io/palantre/opencode-private-vllm@sha256:c2765a7c4c9421c1b7828fd9b5ac5ab7164688e89dc5e63e9ff805e1270e3e6b
 RUNPOD_LLAMA_CPP_IMAGE=ghcr.io/palantre/opencode-private-llama-cpp@sha256:fa196c293c7e72146e5a61c0b16562e10f4b518ffe144f5b4fa6d8628e12f352
 RUNPOD_FORCE_LLAMA_CPP=0
+RUNPOD_CLINICAL_MODE=1
+RUNPOD_CLINICAL_APPROVED_IMAGE_DIGESTS=${RUNPOD_CLINICAL_APPROVED_IMAGE_DIGESTS:-}
 RUNPOD_REGISTRY_AUTH_ID=
 RUNPOD_GPU_IDS='NVIDIA L40S,NVIDIA RTX 6000 Ada Generation,NVIDIA L40,NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090,NVIDIA A100 80GB PCIe,NVIDIA A100-SXM4-80GB'
 RUNPOD_DATA_CENTER_IDS=
@@ -220,6 +222,22 @@ validate_reconcile_settings() {
     die "OPENCODE_GPU_RECONCILE_ATTEMPTS must be an integer from 1 to 99."
   [[ "$RECONCILE_INTERVAL_SECONDS" =~ ^(0|[1-9][0-9]{0,2})$ ]] ||
     die "OPENCODE_GPU_RECONCILE_INTERVAL_SECONDS must be an integer from 0 to 999 without leading zeros."
+}
+
+validate_clinical_mode() {
+  local image_digest
+  [[ "$RUNPOD_CLINICAL_MODE" == 0 || "$RUNPOD_CLINICAL_MODE" == 1 ]] ||
+    die "RUNPOD_CLINICAL_MODE must be 0 or 1."
+  if [[ "$RUNPOD_CLINICAL_MODE" == 1 ]]; then
+    image_digest=${PROFILE_IMAGE##*@sha256:}
+    case ",${RUNPOD_CLINICAL_APPROVED_IMAGE_DIGESTS}," in
+      *,"$image_digest",*) ;;
+      *) die "Clinical mode rejected an inference image without an approved clinical-controls digest." ;;
+    esac
+  fi
+  if [[ "$RUNPOD_CLINICAL_MODE" == 1 && -n "$RUNPOD_NETWORK_VOLUME_ID" && "$PROFILE_ENGINE" != llama_cpp ]]; then
+    die "Clinical mode permits a network volume only with the read-only llama.cpp model-cache profile."
+  fi
 }
 
 reconcile_graphql_create() {
@@ -540,26 +558,29 @@ up() {
   IFS=$'\t' read -r gpu dc price <<< "$selection"
   configure_profile "$gpu"
   validate_profile_image
+  validate_clinical_mode
   terminate_after=$(date -u -d "+${RUNPOD_MAX_SESSION_MINUTES} minutes" +%Y-%m-%dT%H:%M:%SZ)
   if [[ "$PROFILE_ENGINE" == vllm ]]; then
     cache_dir=/root/.cache/huggingface
+    [[ "$RUNPOD_CLINICAL_MODE" == 0 ]] || cache_dir=/var/lib/opencode-gpu/huggingface
     [[ -z "$RUNPOD_NETWORK_VOLUME_ID" ]] || cache_dir=/workspace/huggingface
     env_json=$(jq -cn \
       --arg model "$PROFILE_MODEL" --arg revision "$PROFILE_REVISION" \
       --arg served "$PROFILE_SERVED_MODEL" --arg port "$VLLM_REMOTE_PORT" \
       --arg maxlen "$PROFILE_MAX_MODEL_LEN" --arg maxseqs "$PROFILE_MAX_NUM_SEQS" \
-      --arg cache "$cache_dir" --arg kv "$PROFILE_KV_CACHE_DTYPE" \
-      '{MODEL_ID:$model,MODEL_REVISION:$revision,SERVED_MODEL_NAME:$served,SERVER_PORT:$port,MAX_MODEL_LEN:$maxlen,MAX_NUM_SEQS:$maxseqs,MODEL_CACHE_DIR:$cache,KV_CACHE_DTYPE:$kv}')
+      --arg cache "$cache_dir" --arg kv "$PROFILE_KV_CACHE_DTYPE" --arg clinical "$RUNPOD_CLINICAL_MODE" \
+      '{MODEL_ID:$model,MODEL_REVISION:$revision,SERVED_MODEL_NAME:$served,SERVER_PORT:$port,MAX_MODEL_LEN:$maxlen,MAX_NUM_SEQS:$maxseqs,MODEL_CACHE_DIR:$cache,KV_CACHE_DTYPE:$kv,CLINICAL_MODE:$clinical}')
   else
     cache_dir=/root/.cache/llama.cpp
+    [[ "$RUNPOD_CLINICAL_MODE" == 0 ]] || cache_dir=/var/lib/opencode-gpu/llama.cpp
     [[ -z "$RUNPOD_NETWORK_VOLUME_ID" ]] || cache_dir=/workspace/llama.cpp
     env_json=$(jq -cn \
       --arg url "https://huggingface.co/${LLAMA_CPP_MODEL}/resolve/${PROFILE_REVISION}/${LLAMA_CPP_MODEL_FILE}" \
       --arg file "$LLAMA_CPP_MODEL_FILE" --arg sha "$LLAMA_CPP_MODEL_SHA256" \
       --arg served "$PROFILE_SERVED_MODEL" --arg port "$VLLM_REMOTE_PORT" \
       --arg context "$PROFILE_MAX_MODEL_LEN" --arg parallel "$PROFILE_PARALLEL" \
-      --arg cache "$cache_dir" --arg cache_type "$LLAMA_CPP_CACHE_TYPE" \
-      '{MODEL_URL:$url,MODEL_FILE:$file,MODEL_SHA256:$sha,SERVED_MODEL_NAME:$served,SERVER_PORT:$port,CONTEXT_SIZE:$context,PARALLEL:$parallel,MODEL_CACHE_DIR:$cache,CACHE_TYPE:$cache_type}')
+      --arg cache "$cache_dir" --arg cache_type "$LLAMA_CPP_CACHE_TYPE" --arg clinical "$RUNPOD_CLINICAL_MODE" \
+      '{MODEL_URL:$url,MODEL_FILE:$file,MODEL_SHA256:$sha,SERVED_MODEL_NAME:$served,SERVER_PORT:$port,CONTEXT_SIZE:$context,PARALLEL:$parallel,MODEL_CACHE_DIR:$cache,CACHE_TYPE:$cache_type,CLINICAL_MODE:$clinical}')
   fi
 
   create_args=(pod create --name "$RUNPOD_POD_NAME" --image "$PROFILE_IMAGE" --gpu-id "$gpu"
@@ -611,8 +632,8 @@ up() {
     --arg engine "$PROFILE_ENGINE" --arg image "$PROFILE_IMAGE" --arg model "$PROFILE_MODEL" \
     --arg revision "$PROFILE_REVISION" --arg served "$PROFILE_SERVED_MODEL" \
     --argjson maxlen "$PROFILE_MAX_MODEL_LEN" --arg log_file "$PROFILE_LOG_FILE" \
-    --arg started "$started" --arg terminate "$terminate_after" \
-      '{pod_id:$id,gpu:$gpu,data_center:$dc,price_per_hour:$price,engine:$engine,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,log_file:$log_file,started_at:$started,terminate_after:$terminate}')"
+    --arg started "$started" --arg terminate "$terminate_after" --argjson clinical "$RUNPOD_CLINICAL_MODE" \
+      '{pod_id:$id,gpu:$gpu,data_center:$dc,price_per_hour:$price,engine:$engine,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,clinical_mode:$clinical,log_file:$log_file,started_at:$started,terminate_after:$terminate}')"
 
   (( RUNPOD_MIN_DOWNLOAD_MBPS == 0 )) || wait_for_ssh
   update_state '.ssh_ready_at = $ready | .ssh_ready_seconds = ((($ready | fromdateiso8601) - (.started_at | fromdateiso8601)) | floor)' \
@@ -687,7 +708,7 @@ status() {
     --argjson remote "${remote:-null}" \
     --arg tunnel "$([[ -n "$tunnel_pid" ]] && pid_alive "$tunnel_pid" && printf running || printf stopped)" \
     --arg monitor "$([[ -n "$monitor_pid" ]] && pid_alive "$monitor_pid" && printf running || printf stopped)" \
-    '{pod_id:$local.pod_id,gpu:$local.gpu,engine:($local.engine // "vllm"),model:($local.model // null),max_model_len:($local.max_model_len // null),data_center:$local.data_center,price_per_hour:$local.price_per_hour,ssh_ready_seconds:($local.ssh_ready_seconds // null),startup_seconds:($local.startup_seconds // null),terminate_after:$local.terminate_after,tunnel:$tunnel,idle_monitor:$monitor,runpod_status:($remote.runtimeStatus // $remote.desiredStatus // "unknown")}'
+    '{pod_id:$local.pod_id,clinical_mode:($local.clinical_mode // false),gpu:$local.gpu,engine:($local.engine // "vllm"),model:($local.model // null),max_model_len:($local.max_model_len // null),data_center:$local.data_center,price_per_hour:$local.price_per_hour,ssh_ready_seconds:($local.ssh_ready_seconds // null),startup_seconds:($local.startup_seconds // null),terminate_after:$local.terminate_after,tunnel:$tunnel,idle_monitor:$monitor,runpod_status:($remote.runtimeStatus // $remote.desiredStatus // "unknown")}'
 }
 
 logs() {
@@ -747,6 +768,7 @@ plan() {
   validate_profile_image
   validate_min_download
   validate_reconcile_settings
+  validate_clinical_mode
   if [[ "$PROFILE_ENGINE" == llama_cpp ]]; then
     health_timeout=$LLAMA_CPP_HEALTH_TIMEOUT_SECONDS
   else
@@ -757,9 +779,10 @@ plan() {
     --arg served "$PROFILE_SERVED_MODEL" --argjson maxlen "$PROFILE_MAX_MODEL_LEN" \
     --argjson disk "$RUNPOD_CONTAINER_DISK_GB" --argjson health_timeout "$health_timeout" \
     --argjson min_download "$RUNPOD_MIN_DOWNLOAD_MBPS" \
+    --argjson clinical "$RUNPOD_CLINICAL_MODE" \
     --argjson max_minutes "$RUNPOD_MAX_SESSION_MINUTES" --arg volume "$RUNPOD_NETWORK_VOLUME_ID" \
     --arg volume_dc "${NETWORK_VOLUME_DC:-}" --argjson volume_size "${NETWORK_VOLUME_SIZE_GB:-null}" \
-    '{billable_resource_created:false,gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,engine:$engine,container_disk_gb:$disk,min_download_mbps:$min_download,startup_timeout_seconds:$health_timeout,max_session_minutes:$max_minutes,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,network_volume:(if $volume == "" then null else {id:$volume,data_center:$volume_dc,size_gb:$volume_size} end)}'
+    '{billable_resource_created:false,clinical_mode:($clinical == 1),gpu:$gpu,data_center:$dc,secure_cloud:true,price_per_hour:$price,engine:$engine,container_disk_gb:$disk,min_download_mbps:$min_download,startup_timeout_seconds:$health_timeout,max_session_minutes:$max_minutes,image:$image,model:$model,model_revision:$revision,served_model:$served,max_model_len:$maxlen,network_volume:(if $volume == "" then null else {id:$volume,data_center:$volume_dc,size_gb:$volume_size,mount_access:"read-write",purpose:(if $clinical == 1 then "model-cache-only" else "unrestricted" end),inference_access:(if $clinical == 1 then "read-only" else "read-write" end)} end)}'
 }
 
 monitor() {

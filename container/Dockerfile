@@ -1,8 +1,11 @@
 FROM vllm/vllm-openai:v0.27.1@sha256:c2f3b1b964e47809b722b5e75b61b1e7b39a50f70388cf2bf2418f16a9f31da2
 
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server tini \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gosu openssh-server tini \
     && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system inference \
+    && useradd --system --gid inference --home-dir /var/lib/opencode-gpu --shell /usr/sbin/nologin inference \
+    && install -d -o inference -g inference -m 0700 /var/lib/opencode-gpu /var/lib/opencode-gpu/tmp \
     && mkdir -p /run/sshd /root/.ssh \
     && chmod 700 /root/.ssh \
     && rm -f /etc/ssh/ssh_host_* \

@@ -49,3 +49,66 @@ jobs:
           grep -F -- '--fit' /tmp/llama-server-help
           grep -F -- '--no-mmproj' /tmp/llama-server-help
           grep -F -- '--metrics' /tmp/llama-server-help
+          grep -F -- '--no-cache-prompt' /tmp/llama-server-help
+          grep -F -- '--cache-ram' /tmp/llama-server-help
+          grep -F -- '--no-slots' /tmp/llama-server-help
+          grep -F -- '--log-disable' /tmp/llama-server-help
+      - name: Check unprivileged inference user
+        run: |
+          test "$(docker run --rm --entrypoint gosu "${{ steps.meta.outputs.tags }}" inference id -u)" != 0
+      - name: Check clinical llama.cpp isolation
+        if: matrix.name == 'llama-cpp'
+        run: |
+          set -euo pipefail
+          test_root=$(mktemp -d)
+          workspace="$test_root/workspace"
+          mkdir -p "$workspace/llama.cpp"
+          printf 'public test model\n' > "$workspace/llama.cpp/model.gguf"
+          printf 'stale partial\n' > "$workspace/llama.cpp/model.gguf.partial"
+          model_sha=$(sha256sum "$workspace/llama.cpp/model.gguf" | cut -d ' ' -f 1)
+          cat > "$test_root/fake-server" <<'SCRIPT'
+          #!/bin/sh
+          printf 'uid=%s\n' "$(id -u)"
+          if test -w /workspace; then
+            printf 'workspace_writable=yes\n'
+            exit 90
+          fi
+          printf 'workspace_writable=no\n'
+          trap 'exit 0' TERM INT
+          while :; do sleep 1; done
+          SCRIPT
+          chmod 0755 "$test_root/fake-server"
+          docker run -d --name clinical-llama-test \
+            -e CLINICAL_MODE=1 \
+            -e MODEL_CACHE_DIR=/workspace/llama.cpp \
+            -e MODEL_FILE=model.gguf \
+            -e MODEL_SHA256="$model_sha" \
+            -v "$workspace:/workspace" \
+            -v "$test_root/fake-server:/app/llama-server:ro" \
+            "${{ steps.meta.outputs.tags }}"
+          trap 'docker rm -f clinical-llama-test clinical-llama-reject >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 30); do
+            docker logs clinical-llama-test 2>&1 | grep -F 'workspace_writable=no' && break
+            sleep 1
+          done
+          docker logs clinical-llama-test 2>&1 | grep -E 'uid=[1-9][0-9]*'
+          docker logs clinical-llama-test 2>&1 | grep -F 'workspace_writable=no'
+          test ! -e "$workspace/llama.cpp/model.gguf.partial"
+          docker stop -t 10 clinical-llama-test
+          docker rm clinical-llama-test
+          sudo chmod 0755 "$workspace" "$workspace/llama.cpp"
+          printf 'do not delete\n' | sudo tee "$workspace/unexpected" >/dev/null
+          if docker run --name clinical-llama-reject \
+              -e CLINICAL_MODE=1 \
+              -e MODEL_CACHE_DIR=/workspace/llama.cpp \
+              -e MODEL_FILE=model.gguf \
+              -e MODEL_SHA256="$model_sha" \
+              -v "$workspace:/workspace" \
+              -v "$test_root/fake-server:/app/llama-server:ro" \
+              "${{ steps.meta.outputs.tags }}"; then
+            printf 'Clinical mode accepted unexpected volume content.\n' >&2
+            exit 1
+          fi
+          test -e "$workspace/unexpected"
+          docker rm clinical-llama-reject
+          trap - EXIT
