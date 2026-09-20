@@ -5,7 +5,7 @@ set -euo pipefail
 : "${MODEL_REVISION:=017b9c7af6b5689d5dd426a76e0bc077eb5ca20a}"
 : "${SERVED_MODEL_NAME:=qwen3.8-27b-fp8}"
 : "${SERVER_PORT:=8000}"
-: "${MAX_MODEL_LEN:=32768}"
+: "${MAX_MODEL_LEN:=131072}"
 : "${MAX_NUM_SEQS:=16}"
 : "${MODEL_CACHE_DIR:=/root/.cache/huggingface}"
 : "${KV_CACHE_DTYPE:=fp8}"

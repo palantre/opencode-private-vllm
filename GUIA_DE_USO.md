@@ -163,6 +163,7 @@ Actualmente esta preparada para usar `llama.cpp`, GPUs de Secure Cloud en
 son:
 
 - precio maximo admitido: 1,50 USD por hora de GPU;
+- contexto maximo universal: 131.072 tokens, con hasta 8.192 tokens de salida;
 - terminacion por inactividad de inferencia: 30 minutos;
 - terminacion forzosa del pod: 240 minutos;
 - solo se publica SSH; la API de inferencia no se expone directamente a
@@ -170,6 +171,10 @@ son:
 - modo clinico activado de forma predeterminada;
 - volumen persistente reservado al GGUF publico, con acceso de solo lectura para
   el proceso de inferencia.
+
+Si se reserva la salida maxima, quedan hasta 122.880 tokens para la entrada. Los
+historiales cercanos al limite tardan sensiblemente mas en procesarse, aunque la
+respuesta solicitada sea corta.
 
 El inventario y el precio concretos cambian. `opencode-gpu plan` es la
 comprobacion valida para cada sesion.

@@ -41,7 +41,7 @@ assert_log() {
 
 bash -n "$ROOT/config/opencode-gpu.env.example"
 plan=$(env -u OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS -u RUNPOD_MIN_DOWNLOAD_MBPS "$ROOT/bin/opencode-gpu" plan)
-jq -e '.clinical_mode == true and .engine == "vllm" and .startup_timeout_seconds == 1200 and .min_download_mbps == 100' <<< "$plan" >/dev/null || \
+jq -e '.clinical_mode == true and .engine == "vllm" and .max_model_len == 131072 and .startup_timeout_seconds == 1200 and .min_download_mbps == 100' <<< "$plan" >/dev/null || \
   fail 'vLLM plan did not report its startup timeout'
 export RUNPOD_MIN_DOWNLOAD_MBPS=0
 "$ROOT/bin/opencode-gpu" up >/dev/null
@@ -184,7 +184,7 @@ printf '%s\n' \
   'RUNPOD_LLAMA_CPP_IMAGE=example.invalid/private-llama-cpp@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
   'RUNPOD_MAX_PRICE_PER_HOUR=1.20' > "$OPENCODE_GPU_CONFIG_DIR/config"
 plan=$(env -u OPENCODE_GPU_HEALTH_TIMEOUT_SECONDS "$ROOT/bin/opencode-gpu" plan)
-jq -e '.gpu == "NVIDIA GeForce RTX 5090" and .engine == "llama_cpp" and .max_model_len == 32768 and .startup_timeout_seconds == 3600 and (.image | startswith("example.invalid/private-llama-cpp@sha256:"))' <<< "$plan" >/dev/null || \
+jq -e '.gpu == "NVIDIA GeForce RTX 5090" and .engine == "llama_cpp" and .max_model_len == 131072 and .startup_timeout_seconds == 3600 and (.image | startswith("example.invalid/private-llama-cpp@sha256:"))' <<< "$plan" >/dev/null || \
   fail 'RTX 5090 profile was not selected'
 
 printf '%s\n' \
@@ -193,7 +193,7 @@ printf '%s\n' \
   'RUNPOD_GPU_IDS="NVIDIA GeForce RTX 4090"' \
   'RUNPOD_MAX_PRICE_PER_HOUR=1.20' > "$OPENCODE_GPU_CONFIG_DIR/config"
 plan=$("$ROOT/bin/opencode-gpu" plan)
-jq -e '.gpu == "NVIDIA GeForce RTX 4090" and .engine == "llama_cpp" and .max_model_len == 32768' <<< "$plan" >/dev/null || \
+jq -e '.gpu == "NVIDIA GeForce RTX 4090" and .engine == "llama_cpp" and .max_model_len == 131072' <<< "$plan" >/dev/null || \
   fail 'RTX 4090 profile was not selected'
 
 printf '%s\n' \
@@ -278,7 +278,7 @@ printf '%s\n' \
   'RUNPOD_GPU_IDS="NVIDIA RTX PRO 4500 Blackwell"' \
   'RUNPOD_MAX_PRICE_PER_HOUR=1.20' > "$OPENCODE_GPU_CONFIG_DIR/config"
 plan=$("$ROOT/bin/opencode-gpu" plan)
-jq -e '.gpu == "NVIDIA RTX PRO 4500 Blackwell" and .engine == "llama_cpp" and .max_model_len == 32768' <<< "$plan" >/dev/null || \
+jq -e '.gpu == "NVIDIA RTX PRO 4500 Blackwell" and .engine == "llama_cpp" and .max_model_len == 131072' <<< "$plan" >/dev/null || \
   fail 'forced llama.cpp profile did not route RTX PRO 4500 Blackwell to Q4_K_M'
 unset MOCK_GPU_SCENARIO
 

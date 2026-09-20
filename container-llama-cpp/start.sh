@@ -6,7 +6,7 @@ set -euo pipefail
 : "${MODEL_SHA256:=115a859329b5f4e876bed5ed49225d8097d055783a81945004a80af2fb2703f8}"
 : "${SERVED_MODEL_NAME:=qwen3.8-27b-fp8}"
 : "${SERVER_PORT:=8000}"
-: "${CONTEXT_SIZE:=32768}"
+: "${CONTEXT_SIZE:=131072}"
 : "${PARALLEL:=1}"
 : "${MODEL_CACHE_DIR:=/root/.cache/llama.cpp}"
 : "${CACHE_TYPE:=q8_0}"

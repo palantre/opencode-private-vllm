@@ -59,7 +59,7 @@ jq --arg key_file "$CONFIG_DIR/vllm-api-key" '
           reasoning: true,
           tool_call: true,
           temperature: true,
-          limit: {context: 32768, output: 8192}
+          limit: {context: 131072, output: 8192}
         }
       }
     }

@@ -119,12 +119,12 @@ mutable image tags for every engine. Defaults are:
 - Minimum advertised host download speed: 100 Mbps
 - Clinical mode enabled by default
 - L40S/RTX 6000 Ada/L40: `Qwen/Qwen3.8-27B-FP8` at revision
-  `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, vLLM, 32,768-token context,
+  `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, vLLM, 131,072-token context,
   16 sequences, and FP8 KV cache
 - A100 80 GB: the same official FP8 artifact and vLLM profile, but KV cache
   `auto` because the validated A100 run failed with FP8 KV
 - RTX 5090/4090: `Chungulus/Qwen3.8-27B-Q4_K_M-GGUF` at revision
-  `5ae8e19376c871fd4fccd956a967f58b1598c8aa`, llama.cpp, 32,768-token context,
+  `5ae8e19376c871fd4fccd956a967f58b1598c8aa`, llama.cpp, 131,072-token context,
   one slot, and Q8 KV cache
 - GGUF file SHA-256:
   `115a859329b5f4e876bed5ed49225d8097d055783a81945004a80af2fb2703f8`;
@@ -349,6 +349,16 @@ denied. A synthetic prompt returned successfully and appeared in neither the
 volume nor the disabled server log. An orderly shutdown removed a separate
 synthetic root-created file, and a confirming RTX 5090 start reached readiness
 in 29 seconds with only the GGUF remaining. All validation Pods were deleted.
+
+The universal 131,072-token llama.cpp context was validated on 2026-09-20 with
+115,071-token synthetic prompts and Q8 KV cache. RTX 5090, RTX 4090, and RTX PRO
+4500 Blackwell all recovered markers placed at the beginning, middle, and end of
+the prompt without failures. Post-request VRAM usage was 20,908/32,607 MiB,
+20,788/24,564 MiB, and 20,628/32,623 MiB respectively. The corresponding long
+request times were 60.62, 61.76, and 123.38 seconds. The 8,192-token OpenCode
+output limit leaves up to 122,880 tokens for input when the full output reserve
+is required. The A100 80 GB profile was not exercised because no allowed stock
+was available.
 
 A 50 GB network-volume trial in `EUR-IS-1` used 29 GB for the model cache. Two
 successful A100 starts took 256 and 267 seconds, so a warm cache produced no
