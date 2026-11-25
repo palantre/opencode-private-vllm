@@ -2,6 +2,12 @@ name: Build private inference images
 
 on:
   workflow_dispatch:
+    inputs:
+      image:
+        description: Image to build
+        type: choice
+        options: [all, llama-cpp, vllm]
+        default: all
   push:
     paths:
       - container/**
@@ -18,13 +24,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: vllm
-            context: container
-          - name: llama-cpp
-            context: container-llama-cpp
+        include: ${{ fromJSON(inputs.image == 'llama-cpp' && '[{"name":"llama-cpp","context":"container-llama-cpp"}]' || inputs.image == 'vllm' && '[{"name":"vllm","context":"container"}]' || '[{"name":"vllm","context":"container"},{"name":"llama-cpp","context":"container-llama-cpp"}]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check multimodal artifacts without GPU
+        if: matrix.name == 'llama-cpp'
+        run: |
+          bash -n container-llama-cpp/start.sh
+          python3 tests/test-multimodal.py
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -37,17 +44,26 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/opencode-private-${{ matrix.name }}
           tags: type=sha,prefix=
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build
         with:
           context: ${{ matrix.context }}
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Record immutable image identity
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/opencode-private-${{ matrix.name }}
+        run: |
+          printf '%s@%s\n' "$IMAGE_NAME" "$IMAGE_DIGEST" | tee image-digest.txt
+          cat image-digest.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Check llama.cpp server flags
         if: matrix.name == 'llama-cpp'
         run: |
           docker run --rm --entrypoint /app/llama-server "${{ steps.meta.outputs.tags }}" --help > /tmp/llama-server-help
           grep -F -- '--fit' /tmp/llama-server-help
-          grep -F -- '--no-mmproj' /tmp/llama-server-help
+          grep -F -- '--mmproj' /tmp/llama-server-help
           grep -F -- '--metrics' /tmp/llama-server-help
           grep -F -- '--no-cache-prompt' /tmp/llama-server-help
           grep -F -- '--cache-ram' /tmp/llama-server-help
@@ -85,7 +101,10 @@ jobs:
           mkdir -p "$workspace/llama.cpp"
           printf 'public test model\n' > "$workspace/llama.cpp/model.gguf"
           printf 'stale partial\n' > "$workspace/llama.cpp/model.gguf.partial"
+          printf 'public test projector\n' > "$workspace/llama.cpp/mmproj.gguf"
+          printf 'stale partial\n' > "$workspace/llama.cpp/mmproj.gguf.partial"
           model_sha=$(sha256sum "$workspace/llama.cpp/model.gguf" | cut -d ' ' -f 1)
+          mmproj_sha=$(sha256sum "$workspace/llama.cpp/mmproj.gguf" | cut -d ' ' -f 1)
           cat > "$test_root/fake-server" <<'SCRIPT'
           #!/bin/sh
           printf 'uid=%s\n' "$(id -u)"
@@ -94,6 +113,12 @@ jobs:
             exit 90
           fi
           printf 'workspace_writable=no\n'
+          test -r /workspace/llama.cpp/mmproj.gguf
+          test ! -w /workspace/llama.cpp/mmproj.gguf
+          case " $* " in
+            *" --mmproj /workspace/llama.cpp/mmproj.gguf "*) ;;
+            *) exit 91 ;;
+          esac
           on_term() {
             sleep 2
             if test -e /workspace/runtime-canary; then
@@ -114,6 +139,8 @@ jobs:
             -e MODEL_CACHE_DIR=/workspace/llama.cpp \
             -e MODEL_FILE=model.gguf \
             -e MODEL_SHA256="$model_sha" \
+            -e MMPROJ_FILE=mmproj.gguf \
+            -e MMPROJ_SHA256="$mmproj_sha" \
             -v "$workspace:/workspace" \
             -v "$test_root/fake-server:/app/llama-server:ro" \
             -v "$test_root/output:/test-output" \
@@ -126,11 +153,14 @@ jobs:
           docker logs clinical-llama-test 2>&1 | grep -E 'uid=[1-9][0-9]*'
           docker logs clinical-llama-test 2>&1 | grep -F 'workspace_writable=no'
           test ! -e "$workspace/llama.cpp/model.gguf.partial"
+          test ! -e "$workspace/llama.cpp/mmproj.gguf.partial"
           sudo chmod 0755 "$workspace"
           printf 'synthetic runtime file\n' | sudo tee "$workspace/runtime-canary" >/dev/null
           docker stop -t 10 clinical-llama-test
           grep -F 'canary_present_during_child_stop=yes' "$test_root/output/child-stop"
           test ! -e "$workspace/runtime-canary"
+          test -e "$workspace/llama.cpp/model.gguf"
+          test -e "$workspace/llama.cpp/mmproj.gguf"
           docker rm clinical-llama-test
           sudo chmod 0755 "$workspace" "$workspace/llama.cpp"
           printf 'do not delete\n' | sudo tee "$workspace/unexpected" >/dev/null
@@ -139,6 +169,8 @@ jobs:
               -e MODEL_CACHE_DIR=/workspace/llama.cpp \
               -e MODEL_FILE=model.gguf \
               -e MODEL_SHA256="$model_sha" \
+              -e MMPROJ_FILE=mmproj.gguf \
+              -e MMPROJ_SHA256="$mmproj_sha" \
               -v "$workspace:/workspace" \
               -v "$test_root/fake-server:/app/llama-server:ro" \
               "${{ steps.meta.outputs.tags }}"; then
