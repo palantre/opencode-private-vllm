@@ -76,7 +76,9 @@ changing environment variables**. After building and reviewing the new image:
 
 The check sends an in-memory synthetic red PNG to the loopback endpoint and
 requires the answer `red`; it saves neither the image nor response content.
-Use `--key-file` if the local provider key lives elsewhere. After testing, stop
+The verifier asks the installed controller for its configured local key path
+without displaying its value. Use `--key-file` with an older controller or an
+explicit override. After testing, stop
 the managed session with `gpu-stop`; retained model storage keeps billing.
 
 ## Checks without GPU or Docker
@@ -89,5 +91,9 @@ bash tests/test.sh
 
 Offline tests cover cache reuse, checksum rejection, partial-file promotion,
 projector preservation, symlink/unexpected-file rejection and server flag wiring.
-Build, real projector loading, target-GPU fit and end-to-end vision remain
-unverified until the rebuilt image passes the live synthetic check.
+The corrected image built from commit
+`b30af8ef9b620046add377ceabc30905036e18c0` passed the live synthetic red-image
+check on an RTX 5090 with the configured 131072 context. It also reached ready
+on an RTX 4090 (no image request was sent in that attempt).
+This is not a long-context stress test, a guarantee for every GPU or clinical
+validation. Preserve the synthetic smoke check for subsequent image/runtime updates.
