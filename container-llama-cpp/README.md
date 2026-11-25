@@ -38,6 +38,10 @@ and `LLAMA_CPP_MMPROJ_SHA256` through to the container.
 With `CLINICAL_MODE=1`, a mounted model cache must be `/workspace/llama.cpp`.
 Only the model, projector and their partial files are accepted at startup;
 unexpected content or symlinks are rejected without deleting them.
+After that audit, startup restores owner-only write permission (`0755`, root-owned)
+on the cache directory so a reused `0555` cache can receive a missing projector.
+It is sealed back to `0555` before the inference process starts; neither group
+nor other users receive write permission at any point.
 The inference process runs unprivileged with a read-only cache containing both
 verified artifacts. Prompt caching, slot persistence and server logging remain
 disabled. Cleanup preserves both artifacts and removes transient volume content

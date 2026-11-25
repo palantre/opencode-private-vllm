@@ -108,7 +108,17 @@ download_artifact() {
   rm -f "$partial"
 }
 
+prepare_cache_for_download() {
+  [[ "$CLINICAL_MODE" == 1 ]] || return 0
+  # A reused network cache was sealed 0555 by the previous session. Network
+  # filesystems can enforce that mode even for container root. Only root gets
+  # temporary write access; inference has not started and remains unprivileged.
+  chown root:root "$MODEL_CACHE_DIR"
+  chmod 0755 "$MODEL_CACHE_DIR"
+}
+
 clinical_validate_volume
+prepare_cache_for_download
 
 exec > >(tee -a /var/log/opencode-gpu/llama-cpp.log) 2>&1
 

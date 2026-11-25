@@ -34,6 +34,7 @@ class Multimodal(unittest.TestCase):
         # never operate on the real /workspace or invoke sshd/the real server.
         funcs = "\n".join(function(name) for name in [
             "clinical_validate_volume", "clinical_cleanup", "download_artifact",
+            "prepare_cache_for_download",
         ]).replace("/workspace", str(self.workspace))
         env = dict(os.environ, CLINICAL_MODE="1", MODEL_CACHE_DIR=str(self.cache),
                    MODEL_FILE=self.model.name, MMPROJ_FILE=self.projector.name,
@@ -74,6 +75,20 @@ class Multimodal(unittest.TestCase):
         self.assertTrue(self.projector.exists())
         self.assertFalse(partial.exists())
         self.assertFalse(canary.exists())
+
+    def test_reused_read_only_cache_can_stage_missing_projector(self):
+        self.projector.unlink()
+        self.cache.chmod(0o555)
+        self.shell("""
+# Ownership is tested in the real image CI; this fixture runs unprivileged.
+chown() { [[ "$*" == "root:root $MODEL_CACHE_DIR" ]]; }
+clinical_validate_volume
+prepare_cache_for_download
+[[ $(stat -c %a "$MODEL_CACHE_DIR") == 755 ]]
+printf 'synthetic downloaded projector' > "$mmproj_partial_path"
+""")
+        self.assertTrue(Path(str(self.projector) + ".partial").exists())
+        self.assertEqual(self.model.read_bytes(), b"synthetic language weights")
 
     def test_valid_cached_projector_needs_no_download(self):
         sha = hashlib.sha256(self.projector.read_bytes()).hexdigest()
